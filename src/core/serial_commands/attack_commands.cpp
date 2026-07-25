@@ -2,6 +2,8 @@
 #include "attack_commands.h"
 #include "core/settings.h"
 #include "modules/wifi/evil_portal.h"
+#include "modules/ble/BLE_Suite.h"
+#include "modules/ble/ble_spam.h"
 #include <SimpleCLI.h>
 #include <globals.h>
 
@@ -37,6 +39,36 @@ uint32_t evilportalCmdCallback(cmd *c) {
     return true;
 }
 
+uint32_t blespamCmdCallback(cmd *c) {
+    Command cmd(c);
+    String typeStr = cmd.getArgument("type").getValue();
+    String countStr = cmd.getArgument("count").getValue();
+    typeStr.trim();
+    countStr.trim();
+    int count = countStr.toInt();
+    if (count < 1) count = 10;
+
+    FastPairPopupType fpType;
+    bool useFastPair = true;
+    if (typeStr == "fastpair_regular")      fpType = FP_POPUP_REGULAR;
+    else if (typeStr == "fastpair_fun")     fpType = FP_POPUP_FUN;
+    else if (typeStr == "fastpair_prank")   fpType = FP_POPUP_PRANK;
+    else if (typeStr == "fastpair_custom")  fpType = FP_POPUP_CUSTOM;
+    else { useFastPair = false; }
+
+    if (useFastPair) {
+        FastPairExploitEngine fpEngine;
+        fpEngine.spamFastPairPopups(fpType, count);
+        return true;
+    }
+    if (typeStr == "menu") {
+        spamMenu();
+        return true;
+    }
+    serialDevice->println("usage: blespam <fastpair_regular|fastpair_fun|fastpair_prank|fastpair_custom|menu> <count>");
+    return false;
+}
+
 void createAttackCommands(SimpleCLI *cli) {
     Command ble = cli->addCompositeCmd("ble");
     Command bleApi = ble.addCommand("api", bleApiCmdCallback);
@@ -46,5 +78,9 @@ void createAttackCommands(SimpleCLI *cli) {
     evilportal.addPosArg("ssid", "Free Wifi");
     evilportal.addPosArg("channel", "6");
     evilportal.addPosArg("template", "");
+
+    Command blespam = cli->addCommand("blespam", blespamCmdCallback);
+    blespam.addPosArg("type", "fastpair_regular");
+    blespam.addPosArg("count", "10");
 }
 #endif
