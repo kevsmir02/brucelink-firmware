@@ -2,7 +2,7 @@
 
 **Source of truth:** `docs/superpowers/specs/2026-07-25-bruce-companion-app-design.md` §5. This document is the verbatim contract the `bruce-companion-app` repo vendors. Bump the version line below whenever this contract changes.
 
-**Contract version:** 1.0 (initial — matches firmware commit after Task 11)
+**Contract version:** 1.1 (updated after live-device verification — see §5.7 Blocking Verbs)
 
 ---
 
@@ -87,22 +87,40 @@ Poll `GET http://<portal.softAPIP>/<getCredsEndpoint>` (default configurable via
 
 ## Verbs shipped by the patch
 
-| Verb | One-tap? | Telemetry bucket | Notes |
-|------|----------|------------------|-------|
-| `ble api on\|off` | yes | control plane | toggles BLE_API GATT server |
-| `evilportal <ssid> <ch> [template]` | yes | 🥇 live & programmatic | verify-cmd: poll portal-AP creds endpoint |
-| `blespam <type> <count>` | yes for fastpair_*; `menu` opens TFT | 🥈 TFT-encoded or /ws ble_progress | types: fastpair_regular, fastpair_fun, fastpair_prank, fastpair_custom, menu |
-| `karma` | menu-dispatcher | 🥉 fire-and-forget | opens TFT menu |
-| `deauth [<target>]` | menu-dispatcher (target ignored in v1) | 🥉 fire-and-forget | opens TFT menu |
-| `blesniffer` | menu-dispatcher | 🥈 | opens BLE Suite menu |
-| `ap_info` | yes (display on TFT) | 🥈 | shows current AP info on TFT |
-| `reverseshell` | yes | 🥉 | starts reverse shell listener |
-| `pwngrid` | yes | 🥉 | starts pwnagotchi/Brucegotchi |
+| Verb | Blocks serial? | One-tap? | Telemetry | Notes |
+|------|---------------|----------|-----------|-------|
+| `ble api on\|off` | no | yes | control plane | toggles BLE_API GATT server |
+| `evilportal <ssid> <ch> [template]` | yes (monopolizes radio) | yes | 🥇 live & programmatic | gateway defaults to 192.168.4.1 (phone captive-portal compat); poll portal-AP creds endpoint or /ws cred hook |
+| `blespam <type> <count>` | no (returns after spam cycle) | yes for fastpair_* | 🥈 /ws ble_progress | types: fastpair_regular, fastpair_fun, fastpair_prank, fastpair_custom, menu |
+| `karma` | **YES — blocks** | menu-dispatcher | 🥉 fire-and-forget | opens TFT menu; user must dismiss on device |
+| `deauth [<target>]` | **YES — blocks** | menu-dispatcher (target ignored in v1) | 🥉 fire-and-forget | opens TFT menu; user must dismiss on device |
+| `blesniffer` | **YES — blocks** | menu-dispatcher | 🥈 | opens BLE Suite menu; user must dismiss on device |
+| `ap_info` | **YES — blocks** | one-tap but blocks | 🥈 | shows AP info on TFT; blocks until user dismisses. Only works in STA mode (not AP mode) |
+| `reverseshell` | **YES — blocks** | one-tap | 🥉 | starts reverse shell listener; blocks serial task |
+| `pwngrid` | **YES — blocks** | one-tap | 🥉 | starts pwnagotchi/Brucegotchi; blocks serial task |
+
+### §5.7 Blocking Verbs (critical for app design)
+
+**The `/cm` endpoint queues commands on a depth-2 FreeRTOS queue** (`cmdQueue`). The serial-commands task processes them one at a time. Verbs marked "YES — blocks" above enter a `loopOptions()` or equivalent blocking loop on the TFT that **does not return until the user interacts with the device's physical buttons**. While blocked:
+
+- The serial task is occupied → the `cmdQueue` fills up → **all subsequent `/cm` commands return HTTP 400** ("command failed") until the device-side loop is dismissed.
+- The `/ws` stream stays alive (the AsyncWebServer runs on a separate task) but no new `log`/`state` frames are pushed for the blocked command.
+
+**App design implications:**
+- Non-blocking verbs (`ble api`, `blespam`, `evilportal`) are safe to fire-and-forget from the app — they return immediately or enter autonomous loops that don't block the serial task.
+- Blocking verbs should be presented in the app with a **"Requires on-device interaction"** badge, and the app should **not** send any subsequent commands until the device returns to idle (detectable via `/ws` `state` frame `device_state:"idle"` or by polling `/systeminfo`).
+- **Workaround for future patch:** run blocking verbs in a dedicated FreeRTOS task so the serial task stays free — not in this patch.
+
+### §5.8 `/cm` HTTP method
+
+**`/cm` accepts POST only** (registered as `server->on("/cm", HTTP_POST, ...)` at `webInterface.cpp:543`). GET requests return 404. The companion app must use `POST /cm?cmnd=<verb>`.
 
 ## `/ws` event frames shipped
 
 - `state` — `{type:'state', device_state:'idle|portal|ble_spam|…'}`
 - `ble_progress` — `{type:'ble_progress', msg:string}`
 - `ble_result` — `{type:'ble_result', success:boolean, msg:string}`
-- `log` — `{type:'log', line:string, level?'info'|'warn'|'err'}`
+- `log` — `{type:'log', line:string, level?:'info'|'warn'|'err'}`
 - Plus the initial connect ack: `{id:0, type:'state', device_state:'idle'}`
+
+**Verified on live device:** `blespam fastpair_regular 3` produces a 7-frame sequence: `log` (COMMAND) → `state` (ble_spam) → `ble_progress` (Starting) → `ble_progress` (Sent N) → `ble_progress` (completed) → `state` (idle) → `log` (Result: TRUE).
