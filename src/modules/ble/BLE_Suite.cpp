@@ -19,6 +19,7 @@
 #include "core/radio_mem.h"
 #include "core/utils.h"
 #include "core/wifi/wifi_common.h"
+#include "core/wifi/ws_events.h"
 #include "fastpair_crypto.h"
 #include "modules/NRF24/nrf_jammer_api.h"
 #include <SD.h>
@@ -5931,6 +5932,7 @@ void runHFPHIDPivotAttack(NimBLEAddress target) {
 //=============================================================================
 
 void showAttackProgress(const char *message, uint16_t color) {
+    pushWsEvent("ble_progress", String(",\"msg\":\"") + message + "\"");
     tft.fillScreen(bruceConfig.bgColor);
     tft.drawRect(5, 5, tftWidth - 10, tftHeight - 10, TFT_WHITE);
 
@@ -5983,6 +5985,7 @@ void showAttackProgress(const char *message, uint16_t color) {
 }
 
 void showAttackResult(bool success, const char *message) {
+    pushWsEvent("ble_result", String(",\"success\":") + (success ? "true" : "false") + ",\"msg\":\"" + message + "\"");
     if (success) {
         tft.fillScreen(TFT_GREEN);
         tft.drawRect(5, 5, tftWidth - 10, tftHeight - 10, TFT_BLACK);
