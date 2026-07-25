@@ -169,6 +169,17 @@ String listFiles(FS &fs, const String &folder) {
 ** httpapitoken OR is authenticated by username and password
 **********************************************************************/
 bool checkUserWebAuth(AsyncWebServerRequest *request, bool onFailureReturnLoginPage = false) {
+    // Authorization: Bearer <token> (mobile companion convenience)
+    if (request->hasHeader("Authorization")) {
+        const AsyncWebHeader *auth = request->getHeader("Authorization");
+        String v = auth->value();
+        const char *prefix = "Bearer ";
+        if (v.startsWith(prefix)) {
+            String token = v.substring(strlen(prefix));
+            token.trim();
+            if (bruceConfig.isValidWebUISession(token)) return true;
+        }
+    }
     if (request->hasHeader("Cookie")) {
         const AsyncWebHeader *cookie = request->getHeader("Cookie");
         String c = cookie->value();
