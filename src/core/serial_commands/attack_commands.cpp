@@ -70,10 +70,25 @@ uint32_t blespamCmdCallback(cmd *c) {
     else { useFastPair = false; }
 
     if (useFastPair) {
+        // Pause BLE API GATT server to free DMA memory for the spam attack.
+        // Without this, radioHasMemForBle() sees low DMA (BLE API holding ~15KB)
+        // and tears down WiFi — killing /ws telemetry + app connectivity.
+        bool wasBleApiOn = bleApiIsEnabled();
+        if (wasBleApiOn) {
+            enableBLEAPI();  // toggles OFF
+            Serial.println("[BLE_SPAM] Paused BLE API for spam attack");
+        }
+
         setDeviceState("ble_spam");
         FastPairExploitEngine fpEngine;
         fpEngine.spamFastPairPopups(fpType, count);
         setDeviceState("idle");
+
+        // Resume BLE API GATT server after the attack
+        if (wasBleApiOn) {
+            enableBLEAPI();  // toggles ON
+            Serial.println("[BLE_SPAM] Resumed BLE API after spam attack");
+        }
         return true;
     }
     if (typeStr == "menu") {
