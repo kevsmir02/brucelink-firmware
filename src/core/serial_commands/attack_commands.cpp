@@ -4,6 +4,8 @@
 #include "modules/wifi/evil_portal.h"
 #include "modules/ble/BLE_Suite.h"
 #include "modules/ble/ble_spam.h"
+#include "modules/wifi/karma_attack.h"
+#include "modules/wifi/wifi_atks.h"
 #include <SimpleCLI.h>
 #include <globals.h>
 
@@ -69,6 +71,21 @@ uint32_t blespamCmdCallback(cmd *c) {
     return false;
 }
 
+uint32_t karmaCmdCallback(cmd *c) {
+    karma_setup();
+    return true;
+}
+
+uint32_t deauthCmdCallback(cmd *c) {
+    wifi_atk_menu();
+    return true;
+}
+
+uint32_t blesnifferCmdCallback(cmd *c) {
+    BleSuiteMenu();
+    return true;
+}
+
 void createAttackCommands(SimpleCLI *cli) {
     Command ble = cli->addCompositeCmd("ble");
     Command bleApi = ble.addCommand("api", bleApiCmdCallback);
@@ -82,5 +99,10 @@ void createAttackCommands(SimpleCLI *cli) {
     Command blespam = cli->addCommand("blespam", blespamCmdCallback);
     blespam.addPosArg("type", "fastpair_regular");
     blespam.addPosArg("count", "10");
+
+    cli->addCommand("karma", karmaCmdCallback);
+    Command deauth = cli->addCommand("deauth", deauthCmdCallback);
+    deauth.addPosArg("target", "");
+    cli->addCommand("blesniffer", blesnifferCmdCallback);
 }
 #endif
