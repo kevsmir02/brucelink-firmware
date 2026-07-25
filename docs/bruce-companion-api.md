@@ -2,7 +2,7 @@
 
 **Source of truth:** `docs/superpowers/specs/2026-07-25-bruce-companion-app-design.md` §5. This document is the verbatim contract the `bruce-companion-app` repo vendors. Bump the version line below whenever this contract changes.
 
-**Contract version:** 1.1 (updated after live-device verification — see §5.7 Blocking Verbs)
+**Contract version:** 1.2 (updated after hybrid BLE+WiFi coexistence verification — see §5.9)
 
 ---
 
@@ -124,3 +124,38 @@ Poll `GET http://<portal.softAPIP>/<getCredsEndpoint>` (default configurable via
 - Plus the initial connect ack: `{id:0, type:'state', device_state:'idle'}`
 
 **Verified on live device:** `blespam fastpair_regular 3` produces a 7-frame sequence: `log` (COMMAND) → `state` (ble_spam) → `ble_progress` (Starting) → `ble_progress` (Sent N) → `ble_progress` (completed) → `state` (idle) → `log` (Result: TRUE).
+
+### §5.9 Hybrid BLE+WiFi Coexistence (verified on hardware)
+
+**BLE API GATT server auto-starts at boot** (`main.cpp:setup()` calls `enableBLEAPI()` before WiFi AP init) so the BT controller grabs its ~15KB internal DMA block first. The device advertises as "Bruc" from the moment it boots.
+
+**Verified coexistences (live on smoochiee-board):**
+- ✅ BLE API GATT server + WiFi AP + Web UI HTTP server (all three simultaneously, indefinitely)
+- ✅ HTTP endpoints (`/systeminfo`, `/getscreen`, `/cm`) work while BLE API is active
+- ✅ `/ws` event stream works while BLE API is active
+- ✅ Bearer auth (401 negatives) works while BLE API is active
+- ✅ "Bruc" is visible in BLE scans (confirmed on PC; iPhone 8 did not see it — likely iOS BLE privacy filtering, not a firmware issue)
+
+**Known conflicts (documented for app design):**
+- ⚠️ **BLE attacks + BLE API GATT server conflict.** `blespam`'s `spamFastPairPopups` and other BLE attack functions call `BLEStateManager::initBLE`/`deinitBLE` repeatedly, which re-inits the NimBLE stack and conflicts with the persistent BLE API GATT server. Running `blespam` while BLE API is auto-started can disrupt WiFi. **App mitigation:** before running a BLE attack, send `ble api off` to cleanly shut down the GATT server; after the attack, send `ble api on` to restart it.
+- ⚠️ **WiFi attacks monopolize the radio.** `evilportal`, `karma`, `deauth`, `sniffer` call `cleanlyStopWebUiForWiFiFeature()` which kills the HTTP server. After the attack ends, the Web UI must be manually restarted on the device. During the attack, only BLE control (GATT serial) works.
+
+### §5.10 BLE GATT Serial (control transport)
+
+The BLE API GATT server exposes a serial-over-BLE channel:
+
+| Item | Value |
+|---|---|
+| Service UUID | `4371ec0b-3d43-49f9-b731-7c72a4a7bb91` |
+| Serial Characteristic UUID | `d555ed97-bf2a-4f46-b3eb-d1fcdd7325e9` |
+| Battery Service UUID | `0x180F` (standard) |
+| Battery Characteristic UUID | `0x2A19` (READ\|NOTIFY, updates/min) |
+| Device Name | `Bruc` |
+| Serial char properties | READ \| NOTIFY \| WRITE |
+
+**Protocol:** Write newline-terminated CLI commands to the serial characteristic; receive CLI output via NOTIFY. This is the **same `SerialCli::parse` command bus** as `/cm` — every verb registered through `createAttackCommands` + all existing CLI commands work over BLE serial identically.
+
+**Companion app v1 transport strategy (hybrid):**
+1. **Primary: WiFi** (`POST /cm`, `/ws`, `/getscreen`, `/systeminfo`, file endpoints) — used when WiFi AP is available
+2. **Fallback: BLE GATT serial** — used when WiFi drops (during a WiFi attack) or when the device is not running its AP
+3. **Switch logic:** app detects WiFi loss (HTTP timeout) → switches to BLE serial for stop/status commands → when WiFi returns (detected via BLE serial `state` frame or periodic probe), switches back to WiFi for bulk data
