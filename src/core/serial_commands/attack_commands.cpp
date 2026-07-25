@@ -1,6 +1,7 @@
 #if !defined(LITE_VERSION)
 #include "attack_commands.h"
 #include "core/settings.h"
+#include "core/wifi/ws_events.h"
 #include "modules/wifi/evil_portal.h"
 #include "modules/ble/BLE_Suite.h"
 #include "modules/ble/ble_spam.h"
@@ -40,7 +41,9 @@ uint32_t evilportalCmdCallback(cmd *c) {
     if (ssid.isEmpty()) ssid = "Free Wifi";
     uint8_t channel = (uint8_t)chStr.toInt();
     if (channel < 1 || channel > 13) channel = 6;
+    setDeviceState("portal");
     EvilPortal(ssid, channel, false, false, true, false, templateFile);
+    setDeviceState("idle");
     return true;
 }
 
@@ -62,8 +65,10 @@ uint32_t blespamCmdCallback(cmd *c) {
     else { useFastPair = false; }
 
     if (useFastPair) {
+        setDeviceState("ble_spam");
         FastPairExploitEngine fpEngine;
         fpEngine.spamFastPairPopups(fpType, count);
+        setDeviceState("idle");
         return true;
     }
     if (typeStr == "menu") {

@@ -4,6 +4,9 @@
 #include "freertos/task.h"
 #include "utils.h"
 #include <globals.h>
+#if !defined(LITE_VERSION)
+#include "core/wifi/ws_events.h"
+#endif
 
 QueueHandle_t cmdQueue = nullptr;
 QueueHandle_t rspQueue = nullptr;
@@ -38,17 +41,29 @@ void handleSerialCommands(SerialCli &serialCli) {
     CmdPacket packet;
     if (cmdQueue && rspQueue) {
         if (xQueueReceive(cmdQueue, &packet, 0) == pdTRUE) {
+#if !defined(LITE_VERSION)
+            pushWsLog(String("COMMAND: ") + packet.text, "info");
+#endif
             bool result = serialCli.parse(String(packet.text));
             xQueueSend(rspQueue, &result, 0);
             Serial.println("COMMAND: " + String(packet.text));
             Serial.printf("[CLI] Result: %s\n", result ? "TRUE" : "FALSE");
+#if !defined(LITE_VERSION)
+            pushWsLog(String("[CLI] Result: ") + (result ? "TRUE" : "FALSE"), "info");
+#endif
         }
     }
     if (!serialDevice->available()) return;
 
     String cmd_str = serialDevice->readStringUntil('\n');
     Serial.println("COMMAND: " + cmd_str);
-    serialCli.parse(cmd_str);
+#if !defined(LITE_VERSION)
+    pushWsLog(String("COMMAND: ") + cmd_str, "info");
+#endif
+    bool result = serialCli.parse(cmd_str);
+#if !defined(LITE_VERSION)
+    pushWsLog(String("[CLI] Result: ") + (result ? "TRUE" : "FALSE"), "info");
+#endif
     serialDevice->print("# "); // prompt
 
     // forced menu redrawn if the command is not "nav" or "option"
