@@ -488,14 +488,12 @@ void setup() {
     init_led();
     RAM_LOG("after-tft-clock-led");
 
-    // Auto-start BLE API GATT server at boot — must come BEFORE WiFi AP init
-    // so the BT controller grabs its ~15KB internal DMA block first. If WiFi
-    // starts first, the BLE controller init can disrupt the WiFi stack. Verified
-    // on smoochiee-board: BLE-first + WiFi AP + Web UI all coexist.
-#if !defined(LITE_VERSION)
-    enableBLEAPI();
-    Serial.println("[BOOT] BLE API auto-started (Bruc advertising)");
-#endif
+    // BLE API GATT server is NOT auto-started at boot.
+    // Rationale: BLE attacks (blespam etc.) call BLEStateManager::initBLE which
+    // calls radioHasMemForBle() — if BLE API is holding ~15KB DMA, WiFi gets
+    // torn down. The companion app enables BLE API on-demand when it needs BLE
+    // control (before a WiFi attack that will kill HTTP), and disables it before
+    // launching a BLE attack. WiFi is the primary control path; BLE is fallback.
 
     options.reserve(20); // preallocate some options space to avoid fragmentation
 
