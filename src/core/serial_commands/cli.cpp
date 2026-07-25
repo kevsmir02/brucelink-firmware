@@ -12,6 +12,7 @@
 #include "settings_commands.h"
 #include "sound_commands.h"
 #include "storage_commands.h"
+#include "attack_commands.h"
 #include "util_commands.h"
 #include "wifi_commands.h"
 #include <globals.h>
@@ -50,6 +51,7 @@ void SerialCli::setup() {
 #endif
 #ifndef LITE_VERSION
     createInterpreterCommands(&_cli);
+    createAttackCommands(&_cli);
 #endif
 #ifdef HAS_SCREEN
     createScreenCommands(&_cli);

@@ -1683,6 +1683,8 @@ void enableBLEAPI() {
     ble_api_enabled = !ble_api_enabled;
 }
 
+bool bleApiIsEnabled() { return ble_api_enabled; }
+
 bool appStoreInstalled() {
     FS *fs;
     if (!getFsStorage(fs)) {
