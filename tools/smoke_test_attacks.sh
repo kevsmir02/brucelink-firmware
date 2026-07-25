@@ -9,9 +9,9 @@ set -euo pipefail
 auth="Authorization: Bearer ${BRUCE_TOKEN}"
 pass=0; fail=0
 chk() {
-    local name="$1"; local url="$2"; local want="${3:-200}"
+    local name="$1"; local url="$2"; local want="${3:-200}"; local method="${4:-GET}"
     local code
-    code=$(curl -s -o /dev/null -w '%{http_code}' -H "$auth" "$url")
+    code=$(curl -s -o /dev/null -w '%{http_code}' -X "$method" -H "$auth" "$url")
     if [ "$code" = "$want" ]; then
         echo "PASS  $name -> $code"; pass=$((pass+1))
     else
@@ -25,17 +25,17 @@ chk "GET  /getscreen"     "${BRUCE_URL}/getscreen"
 chk "GET  /listfiles"     "${BRUCE_URL}/listfiles?fs=LittleFS"
 
 echo "== New attack verbs (HTTP 200 = queued) =="
-chk "POST ble api on"     "${BRUCE_URL}/cm?cmnd=ble%20api%20on"
-chk "POST evilportal"     "${BRUCE_URL}/cm?cmnd=evilportal%20FreeWifi%206"
+chk "POST ble api on"     "${BRUCE_URL}/cm?cmnd=ble%20api%20on"              200 POST
+chk "POST evilportal"     "${BRUCE_URL}/cm?cmnd=evilportal%20FreeWifi%206"   200 POST
 sleep 3   # let evil portal spin up — comment out if you don't have a victim device ready
-chk "POST blespam fastpair" "${BRUCE_URL}/cm?cmnd=blespam%20fastpair_regular%203"
-chk "POST karma"          "${BRUCE_URL}/cm?cmnd=karma"
-chk "POST deauth"         "${BRUCE_URL}/cm?cmnd=deauth"
-chk "POST blesniffer"     "${BRUCE_URL}/cm?cmnd=blesniffer"
-chk "POST ap_info"        "${BRUCE_URL}/cm?cmnd=ap_info"
-chk "POST reverseshell"   "${BRUCE_URL}/cm?cmnd=reverseshell"
-chk "POST pwngrid"        "${BRUCE_URL}/cm?cmnd=pwngrid"
-chk "POST ble api off"    "${BRUCE_URL}/cm?cmnd=ble%20api%20off"
+chk "POST blespam fastpair" "${BRUCE_URL}/cm?cmnd=blespam%20fastpair_regular%203" 200 POST
+chk "POST karma"          "${BRUCE_URL}/cm?cmnd=karma"                      200 POST
+chk "POST deauth"         "${BRUCE_URL}/cm?cmnd=deauth"                     200 POST
+chk "POST blesniffer"     "${BRUCE_URL}/cm?cmnd=blesniffer"                  200 POST
+chk "POST ap_info"        "${BRUCE_URL}/cm?cmnd=ap_info"                    200 POST
+chk "POST reverseshell"   "${BRUCE_URL}/cm?cmnd=reverseshell"               200 POST
+chk "POST pwngrid"        "${BRUCE_URL}/cm?cmnd=pwngrid"                     200 POST
+chk "POST ble api off"    "${BRUCE_URL}/cm?cmnd=ble%20api%20off"             200 POST
 
 echo "== Negative auth =="
 curl -s -o /dev/null -w 'no-auth    -> %{http_code}\n' "${BRUCE_URL}/systeminfo"

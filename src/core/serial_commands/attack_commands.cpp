@@ -1,6 +1,7 @@
 #if !defined(LITE_VERSION)
 #include "attack_commands.h"
 #include "core/settings.h"
+#include "core/wifi/wifi_common.h"
 #include "core/wifi/ws_events.h"
 #include "modules/wifi/evil_portal.h"
 #include "modules/ble/BLE_Suite.h"
@@ -70,10 +71,34 @@ uint32_t blespamCmdCallback(cmd *c) {
     else { useFastPair = false; }
 
     if (useFastPair) {
+        // spamFastPairPopups() calls BLEStateManager::initBLE, whose radioHasMemForBle()
+        // guard tears down the WiFi AP to free the ~15KB contiguous internal DMA the BT
+        // controller needs. On this board PSRAM can't back BT-controller DMA, so the AP
+        // and BLE cannot hold their DMA buffers simultaneously — the teardown is a
+        // crash-prevention guard, NOT a bug (see radio_mem.h). Bypassing it to keep the
+        // AP up would half-init esp_bt_controller_init and crash the device — that path
+        // was tried and reverted (commit e2631370). Instead we time-share the radio:
+        // let the guard drop the AP for the short spam, then bring the AP back up so the
+        // companion app / Web UI reconnects. By the time spamFastPairPopups() returns,
+        // its AutoCleanup has deinit'd BLE, so the DMA is free and the AP restart is safe.
+        wifi_mode_t wifiModeBefore = WiFi.getMode();
+        bool apWasUp = (wifiModeBefore == WIFI_MODE_AP || wifiModeBefore == WIFI_MODE_APSTA);
+
         setDeviceState("ble_spam");
         FastPairExploitEngine fpEngine;
         fpEngine.spamFastPairPopups(fpType, count);
         setDeviceState("idle");
+
+        // Auto-recover the AP if the guard tore it down for the spam.
+        if (apWasUp) {
+            wifi_mode_t wifiModeAfter = WiFi.getMode();
+            bool apStillUp = (wifiModeAfter == WIFI_MODE_AP || wifiModeAfter == WIFI_MODE_APSTA);
+            if (!apStillUp) {
+                Serial.println("[BLE_SPAM] Restoring WiFi AP after spam");
+                WiFi.mode(WIFI_AP);
+                _setupAP();
+            }
+        }
         return true;
     }
     if (typeStr == "menu") {
