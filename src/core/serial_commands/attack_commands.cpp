@@ -6,6 +6,9 @@
 #include "modules/ble/ble_spam.h"
 #include "modules/wifi/karma_attack.h"
 #include "modules/wifi/wifi_atks.h"
+#include "modules/wifi/ap_info.h"
+#include "modules/reverseShell/reverseShell.h"
+#include "modules/pwnagotchi/pwnagotchi.h"
 #include <SimpleCLI.h>
 #include <globals.h>
 
@@ -86,6 +89,21 @@ uint32_t blesnifferCmdCallback(cmd *c) {
     return true;
 }
 
+uint32_t apInfoCmdCallback(cmd *c) {
+    displayAPInfo();
+    return true;
+}
+
+uint32_t reverseshellCmdCallback(cmd *c) {
+    ReverseShell();
+    return true;
+}
+
+uint32_t pwngridCmdCallback(cmd *c) {
+    brucegotchi_start();
+    return true;
+}
+
 void createAttackCommands(SimpleCLI *cli) {
     Command ble = cli->addCompositeCmd("ble");
     Command bleApi = ble.addCommand("api", bleApiCmdCallback);
@@ -104,5 +122,8 @@ void createAttackCommands(SimpleCLI *cli) {
     Command deauth = cli->addCommand("deauth", deauthCmdCallback);
     deauth.addPosArg("target", "");
     cli->addCommand("blesniffer", blesnifferCmdCallback);
+    cli->addCommand("ap_info", apInfoCmdCallback);
+    cli->addCommand("reverseshell", reverseshellCmdCallback);
+    cli->addCommand("pwngrid", pwngridCmdCallback);
 }
 #endif
