@@ -2,7 +2,7 @@
 
 **Source of truth:** `docs/superpowers/specs/2026-07-25-bruce-companion-app-design.md` §5. This document is the verbatim contract the `bruce-companion-app` repo vendors. Bump the version line below whenever this contract changes.
 
-**Contract version:** 1.2 (updated after hybrid BLE+WiFi coexistence verification — see §5.9)
+**Contract version:** 1.3 (blespam auto-recover verified — WiFi AP restarts after spam, all 7 /ws frames captured)
 
 ---
 
@@ -137,8 +137,9 @@ Poll `GET http://<portal.softAPIP>/<getCredsEndpoint>` (default configurable via
 - ✅ "Bruc" is visible in BLE scans (confirmed on PC; iPhone 8 did not see it — likely iOS BLE privacy filtering, not a firmware issue)
 
 **Known conflicts (documented for app design):**
-- ⚠️ **BLE attacks + BLE API GATT server conflict.** `blespam`'s `spamFastPairPopups` and other BLE attack functions call `BLEStateManager::initBLE`/`deinitBLE` repeatedly, which re-inits the NimBLE stack and conflicts with the persistent BLE API GATT server. Running `blespam` while BLE API is auto-started can disrupt WiFi. **App mitigation:** before running a BLE attack, send `ble api off` to cleanly shut down the GATT server; after the attack, send `ble api on` to restart it.
+- ⚠️ **`blespam` may briefly drop the WiFi AP.** `spamFastPairPopups` calls `BLEStateManager::initBLE` → `radioHasMemForBle()` which is a **crash guard** — if internal DMA < 15KB, it tears down WiFi to free memory for the BT controller (PSRAM can't back BT DMA; this is a hardware constraint, not a bug). The firmware **auto-recovers**: after the spam finishes and BLE deinit's (freeing DMA), the AP is restarted via `WiFi.mode(WIFI_AP)` + `_setupAP()`. **App handling:** if WiFi drops mid-spam, show "Wi-Fi radio busy — reconnecting…" and auto-reconnect. Verified on hardware: all 7 `/ws` frames captured + WiFi returned to 200 within seconds.
 - ⚠️ **WiFi attacks monopolize the radio.** `evilportal`, `karma`, `deauth`, `sniffer` call `cleanlyStopWebUiForWiFiFeature()` which kills the HTTP server. After the attack ends, the Web UI must be manually restarted on the device. During the attack, only BLE control (GATT serial) works.
+- ⚠️ **BLE API GATT server + BLE attacks don't coexist.** `blespam`/`blesniffer` re-init the NimBLE stack, conflicting with a running BLE API server. **App mitigation:** don't enable `ble api on` before a BLE attack; use WiFi as the control path for BLE attacks. BLE API is only useful as fallback during WiFi attacks (when HTTP is dead).
 
 ### §5.10 BLE GATT Serial (control transport)
 
