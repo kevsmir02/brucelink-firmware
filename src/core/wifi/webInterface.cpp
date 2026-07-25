@@ -8,6 +8,7 @@
 #include "core/settings.h"
 #include "core/utils.h"
 #include "core/wifi/wifi_common.h" // using common wifisetup
+#include "core/wifi/ws_events.h"
 #include "esp_task_wdt.h"
 #include "webFiles.h"
 #include <MD5Builder.h>
@@ -748,6 +749,8 @@ void configureWebServer() {
             }
         }
     });
+
+    beginWsServer(server);
     server->begin();
     Serial.println("Webserver started");
 }
