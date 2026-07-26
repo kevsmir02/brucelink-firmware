@@ -19,6 +19,7 @@ class BLESerialService : public BruceBLEService, public SerialDevice {
     // Guards rx: pushRx() runs on the NimBLE host task, available()/read()/
     // readStringUntil() are polled from the Arduino loop task.
     SemaphoreHandle_t rxMutex = nullptr;
+    void notifyChunked(const uint8_t *data, size_t len);
 
 public:
     BLESerialService();

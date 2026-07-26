@@ -80,16 +80,26 @@ int BLESerialService::available() {
     return n;
 }
 
+// ATT payload is MTU minus the 3-byte notify header. Anything longer is dropped
+// by the stack, so split it. Guard the floor: mtu defaults to 23 before
+// negotiation, and a malformed negotiation could report less.
+void BLESerialService::notifyChunked(const uint8_t *data, size_t len) {
+    size_t chunk = (mtu > 3) ? (size_t)(mtu - 3) : 20;
+    for (size_t off = 0; off < len; off += chunk) {
+        size_t n = (len - off < chunk) ? (len - off) : chunk;
+        bleNotifyRetry(serial_char, data + off, n);
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
 size_t BLESerialService::println(const String &s) {
     String toSend = s + "\r\n";
-    bleNotifyRetry(serial_char, reinterpret_cast<const uint8_t *>(toSend.c_str()), toSend.length());
-    vTaskDelay(pdMS_TO_TICKS(10)); // Add some delay to ensure data is read by the client
+    notifyChunked(reinterpret_cast<const uint8_t *>(toSend.c_str()), toSend.length());
     return toSend.length();
 }
 
 size_t BLESerialService::print(const String &s) {
-    bleNotifyRetry(serial_char, reinterpret_cast<const uint8_t *>(s.c_str()), s.length());
-    vTaskDelay(pdMS_TO_TICKS(10));
+    notifyChunked(reinterpret_cast<const uint8_t *>(s.c_str()), s.length());
     return s.length();
 }
 
@@ -99,12 +109,11 @@ size_t BLESerialService::println(size_t n) {
 }
 
 void BLESerialService::vprintf(const char *fmt, va_list args) {
-    int size = vsnprintf(NULL, 0, fmt, args) + 1;
     char str[BUFFER_SIZE];
-    sprintf(str, fmt, args);
-
-    bleNotifyRetry(serial_char, reinterpret_cast<const uint8_t *>(str), size);
-    vTaskDelay(pdMS_TO_TICKS(10));
+    int n = vsnprintf(str, sizeof(str), fmt, args);
+    if (n < 0) return;
+    size_t len = ((size_t)n < sizeof(str)) ? (size_t)n : sizeof(str) - 1;
+    notifyChunked(reinterpret_cast<const uint8_t *>(str), len);
 }
 
 String BLESerialService::readStringUntil(char terminator) {
@@ -148,8 +157,7 @@ size_t BLESerialService::println(const int n, int format) {
 size_t BLESerialService::println() { return println(""); }
 
 size_t BLESerialService::write(uint8_t *str, size_t size) {
-    bleNotifyRetry(serial_char, str, size);
-    vTaskDelay(pdMS_TO_TICKS(10));
+    notifyChunked(str, size);
     return size;
 }
 
