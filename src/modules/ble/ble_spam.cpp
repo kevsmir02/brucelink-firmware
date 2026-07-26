@@ -34,6 +34,7 @@
 #include "core/radio_mem.h"
 #include "core/sd_functions.h"
 #include "core/utils.h"
+#include "core/wifi/ws_events.h"
 #ifdef CONFIG_BT_NIMBLE_ENABLED
 #include "esp_mac.h"
 #if __has_include("host/ble_hs.h")
@@ -1534,6 +1535,82 @@ static void bleSpamUpdateStats(BleSpamRunState &state) {
         state.window_packets = 0;
         state.window_start_ms = now;
     }
+}
+
+// ============================================================================
+// Non-interactive spam runner
+// ----------------------------------------------------------------------------
+// Lets the /cm serial+web command (and thus the companion app) fire a specific
+// spam type for a fixed packet count WITHOUT the interactive spamMenu() UI. It
+// drives the exact same advertiser the menu uses: init ONCE, rotate the MAC per
+// packet at the interface level (bleSpamSendTick -> bleSpamRestartAdvertiserForMac,
+// no controller teardown), deinit ONCE — the same discipline that fixed the
+// FastPair crash. Progress/result go out over the /ws stream (ble_progress /
+// ble_result) so the app's live counter updates; no on-device screen needed.
+// ============================================================================
+static void bleSpamRunAttack(BleSpamAttackType type, int count) {
+    if (count < 1) count = 10;
+
+    // radioHasMemForBle() frees the WiFi stack if the largest contiguous DMA block
+    // is too small for the BT controller (see core/radio_mem.h); bail cleanly if it
+    // still can't fit rather than crashing half-initialized.
+    if (!radioHasMemForBle()) {
+        pushWsEvent("ble_result", ",\"success\":false,\"msg\":\"BLE init failed — low memory\"");
+        return;
+    }
+
+    BleSpamRunState state;
+    BleSpamConfig config;
+    BleSpamSelection selection;
+    selection.attack_type = type;
+    selection.device_index = 0; // first device of the type; the MAC still rotates per packet
+
+    bleSpamInitAdvertiser(state, config, nullptr, true);
+
+    uint32_t lastReported = 0;
+    while (state.sent_count < (uint32_t)count) {
+        if (check(EscPress)) break; // allow on-device cancel
+        bleSpamSendTick(state, config, selection);
+        bleSpamUpdateStats(state);
+        // Report every 10 packets — the app parses "Sent N popups" to drive its counter.
+        if (state.sent_count - lastReported >= 10) {
+            lastReported = state.sent_count;
+            pushWsEvent("ble_progress", String(",\"msg\":\"Sent ") + String(state.sent_count) + " popups\"");
+        }
+        vTaskDelay(2 / portTICK_PERIOD_MS);
+    }
+
+    bleSpamDeinitAdvertiser();
+
+    pushWsEvent(
+        "ble_result",
+        String(",\"success\":true,\"msg\":\"BLE spam complete — ") + String(state.sent_count) + " packets\""
+    );
+}
+
+// Single source of truth for the app/command verb -> attack type mapping.
+static bool bleSpamAttackTypeFromName(const String &name, BleSpamAttackType &out) {
+#if !defined(LITE_VERSION)
+    if (name == "apple") { out = BLE_SPAM_ATTACK_APPLE_ACTION; return true; } // Continuity NearbyAction — most reliable iOS popup
+#endif
+    if (name == "android") { out = BLE_SPAM_ATTACK_ANDROID_ALERT; return true; }
+    if (name == "ibeacon") { out = BLE_SPAM_ATTACK_BLE_BEACON; return true; }
+    if (name == "samsung") { out = BLE_SPAM_ATTACK_SAMSUNG; return true; }
+    if (name == "windows" || name == "swiftpair") { out = BLE_SPAM_ATTACK_WINDOWS_SWIFT_PAIR; return true; }
+    if (name == "random" || name == "all") { out = BLE_SPAM_ATTACK_RANDOM_ALL; return true; }
+    return false;
+}
+
+bool bleSpamIsKnownAttackName(const String &name) {
+    BleSpamAttackType t;
+    return bleSpamAttackTypeFromName(name, t);
+}
+
+bool bleSpamRunAttackByName(const String &name, int count) {
+    BleSpamAttackType type;
+    if (!bleSpamAttackTypeFromName(name, type)) return false;
+    bleSpamRunAttack(type, count);
+    return true;
 }
 
 static String bleSpamFormatMs(uint32_t ms) { return String(ms) + " ms"; }

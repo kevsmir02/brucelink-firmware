@@ -62,6 +62,14 @@ uint32_t blespamCmdCallback(cmd *c) {
     int count = countStr.toInt();
     if (count < 1) count = 10;
 
+    // The interactive on-device menu drives its own radio lifecycle — no time-share.
+    if (typeStr == "menu") {
+        spamMenu();
+        return true;
+    }
+
+    // Route the type to an engine: fastpair_* -> the FastPair popup engine;
+    // apple/android/ibeacon/samsung/windows/random -> the ble_spam engine.
     FastPairPopupType fpType;
     bool useFastPair = true;
     if (typeStr == "fastpair_regular")      fpType = FP_POPUP_REGULAR;
@@ -70,43 +78,47 @@ uint32_t blespamCmdCallback(cmd *c) {
     else if (typeStr == "fastpair_custom")  fpType = FP_POPUP_CUSTOM;
     else { useFastPair = false; }
 
-    if (useFastPair) {
-        // spamFastPairPopups() calls BLEStateManager::initBLE, whose radioHasMemForBle()
-        // guard tears down the WiFi AP to free the ~15KB contiguous internal DMA the BT
-        // controller needs. On this board PSRAM can't back BT-controller DMA, so the AP
-        // and BLE cannot hold their DMA buffers simultaneously — the teardown is a
-        // crash-prevention guard, NOT a bug (see radio_mem.h). Bypassing it to keep the
-        // AP up would half-init esp_bt_controller_init and crash the device — that path
-        // was tried and reverted (commit e2631370). Instead we time-share the radio:
-        // let the guard drop the AP for the short spam, then bring the AP back up so the
-        // companion app / Web UI reconnects. By the time spamFastPairPopups() returns,
-        // its AutoCleanup has deinit'd BLE, so the DMA is free and the AP restart is safe.
-        wifi_mode_t wifiModeBefore = WiFi.getMode();
-        bool apWasUp = (wifiModeBefore == WIFI_MODE_AP || wifiModeBefore == WIFI_MODE_APSTA);
+    // Validate the verb BEFORE tearing the AP down, so an unknown type doesn't
+    // flap the WiFi AP for nothing.
+    if (!useFastPair && !bleSpamIsKnownAttackName(typeStr)) {
+        serialDevice->println(
+            "usage: blespam <fastpair_regular|fastpair_fun|fastpair_prank|fastpair_custom|"
+            "apple|android|ibeacon|samsung|windows|random|menu> <count>"
+        );
+        return false;
+    }
 
-        setDeviceState("ble_spam");
+    // Both engines monopolize the radio. On no-PSRAM boards the BT controller and the
+    // WiFi AP can't hold their DMA buffers at once, so bringing BLE up tears the AP
+    // down (radioHasMemForBle, see radio_mem.h) — a crash-prevention guard, NOT a bug.
+    // Bypassing it half-inits esp_bt_controller_init and crashes the device; that path
+    // was tried and reverted (commit e2631370). Instead we time-share the radio: let the
+    // guard drop the AP for the short spam, then bring it back up so the companion app /
+    // Web UI reconnects. By the time the spam returns, BLE is deinit'd and the DMA is
+    // free, so the AP restart is safe.
+    wifi_mode_t wifiModeBefore = WiFi.getMode();
+    bool apWasUp = (wifiModeBefore == WIFI_MODE_AP || wifiModeBefore == WIFI_MODE_APSTA);
+
+    setDeviceState("ble_spam");
+    if (useFastPair) {
         FastPairExploitEngine fpEngine;
         fpEngine.spamFastPairPopups(fpType, count);
-        setDeviceState("idle");
+    } else {
+        bleSpamRunAttackByName(typeStr, count);
+    }
+    setDeviceState("idle");
 
-        // Auto-recover the AP if the guard tore it down for the spam.
-        if (apWasUp) {
-            wifi_mode_t wifiModeAfter = WiFi.getMode();
-            bool apStillUp = (wifiModeAfter == WIFI_MODE_AP || wifiModeAfter == WIFI_MODE_APSTA);
-            if (!apStillUp) {
-                Serial.println("[BLE_SPAM] Restoring WiFi AP after spam");
-                WiFi.mode(WIFI_AP);
-                _setupAP();
-            }
+    // Auto-recover the AP if the guard tore it down for the spam.
+    if (apWasUp) {
+        wifi_mode_t wifiModeAfter = WiFi.getMode();
+        bool apStillUp = (wifiModeAfter == WIFI_MODE_AP || wifiModeAfter == WIFI_MODE_APSTA);
+        if (!apStillUp) {
+            Serial.println("[BLE_SPAM] Restoring WiFi AP after spam");
+            WiFi.mode(WIFI_AP);
+            _setupAP();
         }
-        return true;
     }
-    if (typeStr == "menu") {
-        spamMenu();
-        return true;
-    }
-    serialDevice->println("usage: blespam <fastpair_regular|fastpair_fun|fastpair_prank|fastpair_custom|menu> <count>");
-    return false;
+    return true;
 }
 
 uint32_t karmaCmdCallback(cmd *c) {
