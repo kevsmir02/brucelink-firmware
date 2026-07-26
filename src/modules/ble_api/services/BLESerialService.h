@@ -1,16 +1,19 @@
 #pragma once
 #if !defined(LITE_VERSION)
 #include "BruceBLEService.hpp"
+#include "ByteRing.h"
 
 #include <SerialDevice.h>
 
 #define BUFFER_SIZE 128
+#define BLE_RX_RING_SIZE 512
 
 class BLESerialCallbacks;
 
 class BLESerialService : public BruceBLEService, public SerialDevice {
     NimBLECharacteristic *serial_char = nullptr;
     BLESerialCallbacks *callbacks = nullptr;
+    ByteRing<BLE_RX_RING_SIZE> rx;
 
 public:
     BLESerialService();
@@ -31,5 +34,7 @@ public:
     String readStringUntil(char terminator) override;
     int available() override;
     void setMTU(uint16_t mtu);
+    // Called from the characteristic write callback.
+    void pushRx(const uint8_t *data, size_t len);
 };
 #endif

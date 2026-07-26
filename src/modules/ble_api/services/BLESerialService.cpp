@@ -7,13 +7,19 @@ BLESerialService::BLESerialService() : BruceBLEService() {}
 
 BLESerialService::~BLESerialService() {}
 
-static bool newValue = false;
-
 class BLESerialCallbacks : public NimBLECharacteristicCallbacks {
+    BLESerialService *owner;
+
     void onWrite(NimBLECharacteristic *pCharacteristic, NimBLEConnInfo &connInfo) override {
-        newValue = true;
+        std::string v = pCharacteristic->getValue();
+        if (!v.empty()) owner->pushRx(reinterpret_cast<const uint8_t *>(v.data()), v.size());
     }
+
+public:
+    explicit BLESerialCallbacks(BLESerialService *owner) : owner(owner) {}
 };
+
+void BLESerialService::pushRx(const uint8_t *data, size_t len) { rx.write(data, len); }
 
 void BLESerialService::setup(NimBLEServer *pServer) {
     pService = pServer->createService("4371ec0b-3d43-49f9-b731-7c72a4a7bb91");
@@ -23,21 +29,20 @@ void BLESerialService::setup(NimBLEServer *pServer) {
         NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY | NIMBLE_PROPERTY::WRITE
     );
 
-    callbacks = new BLESerialCallbacks();
+    callbacks = new BLESerialCallbacks(this);
     serial_char->setCallbacks(callbacks);
 
     pService->start();
     pServer->getAdvertising()->addServiceUUID(pService->getUUID());
 }
 
-void BLESerialService::end() { delete callbacks; }
-
-int BLESerialService::available() {
-    if (!newValue) return 0;
-    newValue = false;
-
-    return serial_char->getValue().size();
+void BLESerialService::end() {
+    delete callbacks;
+    callbacks = nullptr;
+    rx.clear();
 }
+
+int BLESerialService::available() { return (int)rx.size(); }
 
 size_t BLESerialService::println(const String &s) {
     String toSend = s + "\r\n";
@@ -67,12 +72,11 @@ void BLESerialService::vprintf(const char *fmt, va_list args) {
 }
 
 String BLESerialService::readStringUntil(char terminator) {
-    Serial.println("readStringUntil");
     String result = "";
-    std::string value = serial_char->getValue();
-    for (char c : value) {
-        result += c;
-        if (c == terminator) break;
+    int c;
+    while ((c = rx.read()) >= 0) {
+        if ((char)c == terminator) break;
+        result += (char)c;
     }
     return result;
 }
@@ -100,22 +104,7 @@ size_t BLESerialService::write(uint8_t *str, size_t size) {
     return size;
 }
 
-int BLESerialService::read() {
-    if (!available()) return -1;
-
-    std::string value = serial_char->getValue();
-    if (value.empty()) return -1;
-
-    char firstChar = value[0];
-    // Remove the first character from the buffer
-    if (value.length() > 1) {
-        serial_char->setValue(value.substr(1));
-    } else {
-        serial_char->setValue("");
-    }
-
-    return (int)firstChar;
-}
+int BLESerialService::read() { return rx.read(); }
 
 void BLESerialService::setMTU(uint16_t mtu) { this->mtu = mtu; }
 
