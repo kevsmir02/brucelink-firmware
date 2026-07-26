@@ -192,6 +192,23 @@ conflicts = [
         r'ret = rfalRfDev->rfalISO14443ATransceiveShortFrame\(RFAL_14443A_SHORTFRAME_CMD_WUPA, \(uint8_t \*\)&nfcaDevList->sensRes, \(uint8_t\)rfalConvBytesToBits\(sizeof\(rfalNfcaSensRes\)\), &rcvLen, RFAL_NFCA_FDTMIN\);',
         'rfalNfcaTxRetry(ret, rfalRfDev->rfalISO14443ATransceiveShortFrame(RFAL_14443A_SHORTFRAME_CMD_WUPA, (uint8_t *)&nfcaDevList->sensRes, (uint8_t)rfalConvBytesToBits(sizeof(rfalNfcaSensRes)), &rcvLen, RFAL_NFCA_FDTMIN), (/* Bruce: WUPA had no retry at all - see patch_library_conflicts.py */ RFAL_NFCA_N_RETRANS), RFAL_NFCA_T_RETRANS);'
     ),
+    # AsyncServer::begin() binds without SO_REUSEADDR, so lwIP's tcp_bind() refuses the port if
+    # ANY pcb still holds it - including ones sitting in TIME_WAIT. Every TCP connection the
+    # companion app (or a phone on a previous portal) made to port 80 leaves a TIME_WAIT pcb for
+    # ~60s, so the next server to want port 80 fails with ERR_USE (-8) and silently serves
+    # nothing: Evil Portal comes up, the AP appears, and every request is refused. Hit both when
+    # launching the portal from the app (WebUI had live /ws + HTTP connections) and when simply
+    # relaunching the portal twice in a row. Setting SOF_REUSEADDR on the new pcb makes tcp_bind()
+    # skip the TIME_WAIT list entirely (lwIP tcp.c: max_pcb_lists = NUM_TCP_PCB_LISTS_NO_TIME_WAIT),
+    # which is exactly the conflict we need to ignore; genuine live-listener conflicts are still
+    # rejected. Requires SO_REUSE, which ESP-IDF enables by default (CONFIG_LWIP_SO_REUSE=1).
+    # Matches the library's own idiom for touching so_options (see SOF_KEEPALIVE in setKeepAlive).
+    (
+        ".pio/libdeps/*/AsyncTCP/src/AsyncTCP.cpp",
+        r'err = _tcp_bind\(&_pcb, &_addr, _port\);',
+        '_pcb->so_options |= SOF_REUSEADDR; /* Bruce: skip TIME_WAIT, see patch_library_conflicts.py */\n'
+        '  err = _tcp_bind(&_pcb, &_addr, _port);'
+    ),
     # 2 retries (EMVCo default) is occasionally still not enough margin for PN532's I2C-relayed
     # response time under load; bumped to 4 as a balance between activation reliability and not
     # inflating worst-case discovery latency against genuinely absent tags.
