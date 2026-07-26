@@ -46,6 +46,7 @@ String generateToken(int length = 24) {
 void stopWebUi() {
     tft.setLogging(false);
     isWebUIActive = false;
+    endWsServer(); // drop our borrowed /ws pointer; the server dtor below frees it
     server->end();
     server->~AsyncWebServer();
     free(server);
