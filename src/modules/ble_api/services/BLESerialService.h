@@ -4,6 +4,8 @@
 #include "ByteRing.h"
 
 #include <SerialDevice.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 #define BUFFER_SIZE 128
 #define BLE_RX_RING_SIZE 512
@@ -14,6 +16,9 @@ class BLESerialService : public BruceBLEService, public SerialDevice {
     NimBLECharacteristic *serial_char = nullptr;
     BLESerialCallbacks *callbacks = nullptr;
     ByteRing<BLE_RX_RING_SIZE> rx;
+    // Guards rx: pushRx() runs on the NimBLE host task, available()/read()/
+    // readStringUntil() are polled from the Arduino loop task.
+    SemaphoreHandle_t rxMutex = nullptr;
 
 public:
     BLESerialService();

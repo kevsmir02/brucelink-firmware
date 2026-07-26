@@ -3,9 +3,20 @@
 #include "modules/ble/ble_common.h" // bleNotifyRetry
 #include <NimBLEDevice.h>
 
-BLESerialService::BLESerialService() : BruceBLEService() {}
+// Bounded wait for rxMutex. pushRx() (NimBLE host task) and
+// available()/read()/readStringUntil() (Arduino loop task, via
+// handleSerialCommands) run on different FreeRTOS tasks and touch ByteRing's
+// non-atomic head/tail/count fields, so this is genuine cross-task access,
+// not just interleaving. A short bounded timeout means neither task ever
+// blocks indefinitely; on timeout, callers degrade to "no data" rather than
+// risk corrupting the ring.
+#define BLE_RX_MUTEX_TIMEOUT_MS 50
 
-BLESerialService::~BLESerialService() {}
+BLESerialService::BLESerialService() : BruceBLEService() { rxMutex = xSemaphoreCreateMutex(); }
+
+BLESerialService::~BLESerialService() {
+    if (rxMutex) vSemaphoreDelete(rxMutex);
+}
 
 class BLESerialCallbacks : public NimBLECharacteristicCallbacks {
     BLESerialService *owner;
@@ -19,7 +30,23 @@ public:
     explicit BLESerialCallbacks(BLESerialService *owner) : owner(owner) {}
 };
 
-void BLESerialService::pushRx(const uint8_t *data, size_t len) { rx.write(data, len); }
+void BLESerialService::pushRx(const uint8_t *data, size_t len) {
+    if (!rxMutex) return;
+    if (xSemaphoreTake(rxMutex, pdMS_TO_TICKS(BLE_RX_MUTEX_TIMEOUT_MS)) != pdTRUE) return;
+    size_t accepted = rx.write(data, len);
+    xSemaphoreGive(rxMutex);
+
+    // Should never fire: BLE_RX_RING_SIZE (512) comfortably holds several
+    // queued sub-MTU commands. If it does, an overflow is silently truncating
+    // a command, so surface it loudly rather than let it fail mysteriously.
+    if (accepted < len) {
+        Serial.printf(
+            "BLESerialService: RX ring overflow, dropped %u of %u bytes\n",
+            (unsigned)(len - accepted),
+            (unsigned)len
+        );
+    }
+}
 
 void BLESerialService::setup(NimBLEServer *pServer) {
     pService = pServer->createService("4371ec0b-3d43-49f9-b731-7c72a4a7bb91");
@@ -39,10 +66,19 @@ void BLESerialService::setup(NimBLEServer *pServer) {
 void BLESerialService::end() {
     delete callbacks;
     callbacks = nullptr;
-    rx.clear();
+    if (rxMutex && xSemaphoreTake(rxMutex, pdMS_TO_TICKS(BLE_RX_MUTEX_TIMEOUT_MS)) == pdTRUE) {
+        rx.clear();
+        xSemaphoreGive(rxMutex);
+    }
 }
 
-int BLESerialService::available() { return (int)rx.size(); }
+int BLESerialService::available() {
+    if (!rxMutex) return 0;
+    if (xSemaphoreTake(rxMutex, pdMS_TO_TICKS(BLE_RX_MUTEX_TIMEOUT_MS)) != pdTRUE) return 0;
+    int n = (int)rx.size();
+    xSemaphoreGive(rxMutex);
+    return n;
+}
 
 size_t BLESerialService::println(const String &s) {
     String toSend = s + "\r\n";
@@ -73,11 +109,24 @@ void BLESerialService::vprintf(const char *fmt, va_list args) {
 
 String BLESerialService::readStringUntil(char terminator) {
     String result = "";
+    if (!rxMutex) return result;
+    // Held across the whole drain loop, not per-read(), so a concurrent
+    // pushRx() on the NimBLE host task can't interleave bytes mid-line. The
+    // loop is bounded by the ring size, so holding the lock this long is
+    // safe.
+    if (xSemaphoreTake(rxMutex, pdMS_TO_TICKS(BLE_RX_MUTEX_TIMEOUT_MS)) != pdTRUE) return result;
+
+    // NOTE: if no terminator byte is present, this drains the whole ring and
+    // returns the fragment, indistinguishable from a complete line. That's
+    // safe only because of the write-side invariant this transport relies
+    // on: the app always sends one complete, `\n`-terminated command per
+    // characteristic write, well under the negotiated MTU.
     int c;
     while ((c = rx.read()) >= 0) {
         if ((char)c == terminator) break;
         result += (char)c;
     }
+    xSemaphoreGive(rxMutex);
     return result;
 }
 
@@ -104,7 +153,13 @@ size_t BLESerialService::write(uint8_t *str, size_t size) {
     return size;
 }
 
-int BLESerialService::read() { return rx.read(); }
+int BLESerialService::read() {
+    if (!rxMutex) return -1;
+    if (xSemaphoreTake(rxMutex, pdMS_TO_TICKS(BLE_RX_MUTEX_TIMEOUT_MS)) != pdTRUE) return -1;
+    int c = rx.read();
+    xSemaphoreGive(rxMutex);
+    return c;
+}
 
 void BLESerialService::setMTU(uint16_t mtu) { this->mtu = mtu; }
 
