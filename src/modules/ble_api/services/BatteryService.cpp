@@ -16,7 +16,7 @@ void battery_handler_task(void *params) {
         uint8_t val = getBattery();
         battery_char->setValue(&val, 1);
 
-        delay(60000); // Update battery every minute
+        vTaskDelay(pdMS_TO_TICKS(60000)); // Update battery every minute
     }
 }
 
@@ -38,12 +38,20 @@ void BatteryService::setup(BLEServer *pServer) {
     xTaskCreate(
         battery_handler_task,
         "battery_ble_handler",
-        2048,
+        // 4096, not 2048: getBattery() goes through XPowersLib over I2C on some
+        // boards, and that call chain overflows a 2 KB stack — the canary trips
+        // ~60s after the BLE API is enabled, rebooting the device mid-session.
+        4096,
         battery_char,
         tskIDLE_PRIORITY,
         &battery_task_handle
     );
 }
 
-void BatteryService::end() { vTaskDelete(battery_task_handle); }
+void BatteryService::end() {
+    if (battery_task_handle) {
+        vTaskDelete(battery_task_handle);
+        battery_task_handle = nullptr;
+    }
+}
 #endif
