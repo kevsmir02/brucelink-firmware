@@ -40,6 +40,11 @@ public:
         (void)terminator;
         return available() > 0;
     }
+
+    // Called once after a command's output is fully written, so a transport can
+    // mark the boundary for a programmatic client. Default is a no-op: on a
+    // human-facing console the "# " prompt already serves this purpose.
+    virtual void endOfResponse() {}
     virtual ~SerialDevice() = default;
 };
 

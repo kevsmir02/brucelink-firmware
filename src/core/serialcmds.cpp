@@ -67,7 +67,8 @@ void handleSerialCommands(SerialCli &serialCli) {
 #if !defined(LITE_VERSION)
     pushWsLog(String("[CLI] Result: ") + (result ? "TRUE" : "FALSE"), "info");
 #endif
-    serialDevice->print("# "); // prompt
+    serialDevice->print("# "); // prompt, for a human at a console
+    serialDevice->endOfResponse(); // unambiguous boundary, for a programmatic client
 
     // forced menu redrawn if the command is not "nav" or "option"
     // it allows navigation commands to be executed without returning to the menu, while other commands will

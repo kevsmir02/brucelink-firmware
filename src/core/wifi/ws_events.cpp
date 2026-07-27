@@ -14,6 +14,9 @@
 static AsyncWebSocket *ws = nullptr;
 static uint32_t wsEventId = 0;
 static String deviceState = "idle";
+static EventSink extraSink = nullptr;
+
+void registerEventSink(EventSink sink) { extraSink = sink; }
 
 void beginWsServer(AsyncWebServer *server) {
     if (!server) return;
@@ -51,16 +54,14 @@ void endWsServer() {
 }
 
 void pushWsEvent(const String &type, const String &jsonPayload) {
-    // The ID is allocated for every event, whether or not anyone is listening.
-    // The app resumes with EventStream.lastEventId, which assumes a single
-    // monotonic, gap-free ID space that survives WebUI teardown. Allocating only
-    // when a WebSocket client happens to be attached stalled the counter, so
-    // events raised while the socket was down silently reused IDs the app had
-    // already seen and were treated as replays.
-    uint32_t id = ++wsEventId;
-    if (!ws || ws->count() == 0) return;
-    String frame = "{\"id\":" + String(id) + ",\"type\":\"" + type + "\"" + jsonPayload + "}";
-    ws->textAll(frame);
+    // Built unconditionally. The ID must keep incrementing even when the
+    // WebSocket is gone — a WiFi attack tearing the WebUI down is exactly the
+    // case BLE exists to cover — so the BLE stream carries a gap-free
+    // continuation of the same ID space and the app's lastEventId replay still
+    // works across a transport switch.
+    String frame = "{\"id\":" + String(++wsEventId) + ",\"type\":\"" + type + "\"" + jsonPayload + "}";
+    if (ws && ws->count() > 0) ws->textAll(frame);
+    if (extraSink) extraSink(frame);
 }
 
 void pushWsLog(const String &line, const char *level) {

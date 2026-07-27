@@ -2,9 +2,17 @@
 #include "ble_api.hpp"
 #include <NimBLEDevice.h>
 #include <core/USBSerial/USBSerial.h>
+#include <core/wifi/ws_events.h>
 #include <globals.h>
 
 BLE_API::BLE_API() = default;
+
+// ws_events holds a plain function pointer, so route through a file-scope
+// forwarder rather than giving it a hard dependency on this module.
+static BLESerialService *g_event_service = nullptr;
+static void bleEventSink(const String &frame) {
+    if (g_event_service) g_event_service->notifyEvent(frame);
+}
 
 class BLEAPICallback : public NimBLEServerCallbacks {
     BLE_API *api;
@@ -35,6 +43,9 @@ void BLE_API::setup() {
     pAdvertising->enableScanResponse(false); // Save some battery
     pAdvertising->setName("Bruc");           // Bruce is too long for adv packet len
     pAdvertising->start();
+
+    g_event_service = &serial_service;
+    registerEventSink(&bleEventSink);
 }
 
 void BLE_API::update_mtu(uint16_t mtu) {
@@ -43,6 +54,12 @@ void BLE_API::update_mtu(uint16_t mtu) {
 }
 
 void BLE_API::end() {
+    // Order matters: the sink must stop firing before the service it forwards
+    // to is torn down, or a log raised mid-teardown notifies a dead
+    // characteristic.
+    registerEventSink(nullptr);
+    g_event_service = nullptr;
+
     battery_service.end();
     serial_service.end();
     BLEDevice::deinit();

@@ -30,6 +30,19 @@ public:
     explicit BLESerialCallbacks(BLESerialService *owner) : owner(owner) {}
 };
 
+// subValue is the raw CCCD bitmask: 0 = unsubscribed, bit 0 = notify,
+// bit 1 = indicate. Anything non-zero means somebody is listening.
+class BLEEventCallbacks : public NimBLECharacteristicCallbacks {
+    BLESerialService *owner;
+
+    void onSubscribe(NimBLECharacteristic *, NimBLEConnInfo &, uint16_t subValue) override {
+        owner->setEventSubscribed(subValue != 0);
+    }
+
+public:
+    explicit BLEEventCallbacks(BLESerialService *owner) : owner(owner) {}
+};
+
 void BLESerialService::pushRx(const uint8_t *data, size_t len) {
     if (!rxMutex) return;
     if (xSemaphoreTake(rxMutex, pdMS_TO_TICKS(BLE_RX_MUTEX_TIMEOUT_MS)) != pdTRUE) return;
@@ -59,6 +72,14 @@ void BLESerialService::setup(NimBLEServer *pServer) {
     callbacks = new BLESerialCallbacks(this);
     serial_char->setCallbacks(callbacks);
 
+    // Notify-only: events flow device -> app exclusively. Mirrors the existing
+    // /cm (request-response) + /ws (events) split on the HTTP side.
+    event_char = pService->createCharacteristic(
+        "d555ed98-bf2a-4f46-b3eb-d1fcdd7325e9", NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY
+    );
+    event_callbacks = new BLEEventCallbacks(this);
+    event_char->setCallbacks(event_callbacks);
+
     pService->start();
     pServer->getAdvertising()->addServiceUUID(pService->getUUID());
 }
@@ -66,6 +87,14 @@ void BLESerialService::setup(NimBLEServer *pServer) {
 void BLESerialService::end() {
     delete callbacks;
     callbacks = nullptr;
+    delete event_callbacks;
+    event_callbacks = nullptr;
+    event_subscribed = false;
+    // Borrowed pointers — the NimBLE service owns them and frees them on
+    // deinit. Dropping them here stops notifyEvent()/endOfResponse() touching
+    // freed memory between end() and the next setup().
+    serial_char = nullptr;
+    event_char = nullptr;
     if (rxMutex && xSemaphoreTake(rxMutex, pdMS_TO_TICKS(BLE_RX_MUTEX_TIMEOUT_MS)) == pdTRUE) {
         rx.clear();
         xSemaphoreGive(rxMutex);
@@ -99,13 +128,51 @@ bool BLESerialService::hasLine(char terminator) {
 // ATT payload is MTU minus the 3-byte notify header. Anything longer is dropped
 // by the stack, so split it. Guard the floor: mtu defaults to 23 before
 // negotiation, and a malformed negotiation could report less.
-void BLESerialService::notifyChunked(const uint8_t *data, size_t len) {
+// No pacing delay between chunks: bleNotifyRetry() already applies backpressure,
+// returning as soon as the notify is queued and yielding a tick only when the
+// host's queue is full. A blanket sleep on the happy path was pure dead time —
+// at the default MTU of 23 a 469-byte systeminfo reply spent 240ms asleep.
+//
+// A failed chunk aborts the rest. The return value used to be discarded, so a
+// notify that exhausted its retries silently truncated the payload and the
+// client saw a malformed reply with no indication why.
+void BLESerialService::notifyChunkedTo(NimBLECharacteristic *chr, const uint8_t *data, size_t len) {
+    if (!chr) return;
     size_t chunk = (mtu > 3) ? (size_t)(mtu - 3) : 20;
     for (size_t off = 0; off < len; off += chunk) {
         size_t n = (len - off < chunk) ? (len - off) : chunk;
-        bleNotifyRetry(serial_char, data + off, n);
-        vTaskDelay(pdMS_TO_TICKS(10));
+        if (!bleNotifyRetry(chr, data + off, n)) {
+            Serial.printf(
+                "BLESerialService: notify failed at offset %u of %u, payload truncated\n",
+                (unsigned)off,
+                (unsigned)len
+            );
+            return;
+        }
     }
+}
+
+void BLESerialService::notifyChunked(const uint8_t *data, size_t len) {
+    notifyChunkedTo(serial_char, data, len);
+}
+
+void BLESerialService::endOfResponse() {
+    const uint8_t eot = BLE_RESPONSE_EOT;
+    notifyChunkedTo(serial_char, &eot, 1);
+}
+
+void BLESerialService::setEventSubscribed(bool subscribed) { event_subscribed = subscribed; }
+
+bool BLESerialService::hasEventSubscriber() const { return event_char != nullptr && event_subscribed; }
+
+// Frames are newline-delimited so a client can split a chunked stream back into
+// whole JSON objects. Dropped when nobody is subscribed rather than queued —
+// the app resumes via lastEventId replay, so buffering here would only add a
+// second, weaker recovery path.
+void BLESerialService::notifyEvent(const String &frame) {
+    if (!hasEventSubscriber()) return;
+    String line = frame + "\n";
+    notifyChunkedTo(event_char, reinterpret_cast<const uint8_t *>(line.c_str()), line.length());
 }
 
 size_t BLESerialService::println(const String &s) {
