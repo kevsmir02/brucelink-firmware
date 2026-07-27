@@ -72,12 +72,28 @@ void BLESerialService::end() {
     }
 }
 
+// Raw unread byte count. Deliberately NOT line-aware: the YMODEM transfer in
+// core/serial_commands/storage_commands.cpp polls available() and read() for
+// arbitrary binary bytes that contain no terminator. Line framing lives in
+// hasLine() instead.
 int BLESerialService::available() {
     if (!rxMutex) return 0;
     if (xSemaphoreTake(rxMutex, pdMS_TO_TICKS(BLE_RX_MUTEX_TIMEOUT_MS)) != pdTRUE) return 0;
     int n = (int)rx.size();
     xSemaphoreGive(rxMutex);
     return n;
+}
+
+// Measured on smoochiee-board: an unnegotiated MTU of 23 caps a characteristic
+// write at 20 bytes, so any longer command genuinely arrives split across
+// several writes. Reporting "ready" on a partial line would make
+// handleSerialCommands() parse a fragment as though it were a whole command.
+bool BLESerialService::hasLine(char terminator) {
+    if (!rxMutex) return false;
+    if (xSemaphoreTake(rxMutex, pdMS_TO_TICKS(BLE_RX_MUTEX_TIMEOUT_MS)) != pdTRUE) return false;
+    bool ready = rx.contains((uint8_t)terminator);
+    xSemaphoreGive(rxMutex);
+    return ready;
 }
 
 // ATT payload is MTU minus the 3-byte notify header. Anything longer is dropped
@@ -125,11 +141,20 @@ String BLESerialService::readStringUntil(char terminator) {
     // safe.
     if (xSemaphoreTake(rxMutex, pdMS_TO_TICKS(BLE_RX_MUTEX_TIMEOUT_MS)) != pdTRUE) return result;
 
-    // NOTE: if no terminator byte is present, this drains the whole ring and
-    // returns the fragment, indistinguishable from a complete line. That's
-    // safe only because of the write-side invariant this transport relies
-    // on: the app always sends one complete, `\n`-terminated command per
-    // characteristic write, well under the negotiated MTU.
+    // With no terminator buffered there is no complete line to return. Leave the
+    // bytes in the ring for the next call rather than draining them: the rest of
+    // the command is still arriving in a later characteristic write, and
+    // returning the fragment would hand a truncated command to the parser.
+    //
+    // This previously assumed one whole command per write, which held only while
+    // the MTU was large enough to fit it. It is not: writing "system" then
+    // "info\n" as two writes produced `ERROR: Command not found at 'system'`
+    // followed by the output of `info`, instead of running `systeminfo`.
+    if (!rx.contains((uint8_t)terminator)) {
+        xSemaphoreGive(rxMutex);
+        return result;
+    }
+
     int c;
     while ((c = rx.read()) >= 0) {
         if ((char)c == terminator) break;

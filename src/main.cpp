@@ -493,7 +493,15 @@ void setup() {
     // calls radioHasMemForBle() — if BLE API is holding ~15KB DMA, WiFi gets
     // torn down. The companion app enables BLE API on-demand when it needs BLE
     // control (before a WiFi attack that will kill HTTP), and disables it before
-    // launching a BLE attack. WiFi is the primary control path; BLE is fallback.
+    // launching a BLE attack.
+    //
+    // BLE is the primary control and event path; WiFi is retained only for bulk
+    // transfers (screenshots, file listing/reading) when the AP happens to be up.
+    // WiFi cannot be primary because every WiFi attack destroys the medium the
+    // connection depends on. Verified on smoochiee-board 2026-07-27: a BLE
+    // connection survives both deauth and Evil Portal and carries CLI traffic
+    // throughout. Not auto-starting at boot is a DMA-contention concession, not
+    // a statement that BLE is secondary.
 
     options.reserve(20); // preallocate some options space to avoid fragmentation
 

@@ -39,6 +39,7 @@ public:
     void flush() override {}
     String readStringUntil(char terminator) override;
     int available() override;
+    bool hasLine(char terminator) override;
     void setMTU(uint16_t mtu);
     // Called from the characteristic write callback.
     void pushRx(const uint8_t *data, size_t len);

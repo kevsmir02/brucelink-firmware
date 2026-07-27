@@ -51,8 +51,15 @@ void endWsServer() {
 }
 
 void pushWsEvent(const String &type, const String &jsonPayload) {
+    // The ID is allocated for every event, whether or not anyone is listening.
+    // The app resumes with EventStream.lastEventId, which assumes a single
+    // monotonic, gap-free ID space that survives WebUI teardown. Allocating only
+    // when a WebSocket client happens to be attached stalled the counter, so
+    // events raised while the socket was down silently reused IDs the app had
+    // already seen and were treated as replays.
+    uint32_t id = ++wsEventId;
     if (!ws || ws->count() == 0) return;
-    String frame = "{\"id\":" + String(++wsEventId) + ",\"type\":\"" + type + "\"" + jsonPayload + "}";
+    String frame = "{\"id\":" + String(id) + ",\"type\":\"" + type + "\"" + jsonPayload + "}";
     ws->textAll(frame);
 }
 

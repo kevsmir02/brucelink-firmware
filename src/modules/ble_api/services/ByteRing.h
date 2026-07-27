@@ -35,6 +35,17 @@ public:
         return accepted;
     }
 
+    // True if an unread byte equals `needle`. Non-mutating: callers use it to ask
+    // "is a complete line buffered?" before deciding to consume one. Walks from
+    // head with modulo indexing, so it stays correct across the wrap point and
+    // never sees already-consumed slots.
+    bool contains(uint8_t needle) const {
+        for (size_t i = 0, idx = head; i < count; ++i, idx = (idx + 1) % N) {
+            if (buf[idx] == needle) return true;
+        }
+        return false;
+    }
+
     // Returns -1 when empty.
     int read() {
         if (count == 0) return -1;

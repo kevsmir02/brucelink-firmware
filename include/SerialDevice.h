@@ -25,6 +25,21 @@ public:
 
     virtual int available() = 0;
     virtual String readStringUntil(char terminator) = 0;
+
+    // True when a complete `terminator`-delimited line is buffered, so
+    // readStringUntil() will return a whole one rather than a fragment.
+    //
+    // Distinct from available() on purpose: available() is a raw byte count and
+    // binary consumers depend on it (the YMODEM transfer in
+    // core/serial_commands/storage_commands.cpp reads arbitrary bytes that never
+    // contain a terminator). Line-framed callers must ask this instead.
+    //
+    // Stream-backed transports block internally until the terminator or a
+    // timeout, so "has any bytes" is the right answer for them.
+    virtual bool hasLine(char terminator) {
+        (void)terminator;
+        return available() > 0;
+    }
     virtual ~SerialDevice() = default;
 };
 

@@ -53,7 +53,10 @@ void handleSerialCommands(SerialCli &serialCli) {
 #endif
         }
     }
-    if (!serialDevice->available()) return;
+    // hasLine(), not available(): on BLE a command can arrive split across
+    // several characteristic writes, and acting on a partial one would parse a
+    // fragment as a whole command.
+    if (!serialDevice->hasLine('\n')) return;
 
     String cmd_str = serialDevice->readStringUntil('\n');
     Serial.println("COMMAND: " + cmd_str);
