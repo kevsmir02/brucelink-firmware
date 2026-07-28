@@ -85,6 +85,13 @@ void BLESerialService::setup(NimBLEServer *pServer) {
 }
 
 void BLESerialService::end() {
+    // Detach from the characteristics BEFORE freeing the callback objects: NimBLE
+    // holds these raw pointers, and a peer write or CCCD write arriving between the
+    // delete and the stack teardown would dereference freed memory. Suspending the
+    // API around every BLE attack drives this window routinely, so it is not
+    // theoretical.
+    if (serial_char) serial_char->setCallbacks(nullptr);
+    if (event_char) event_char->setCallbacks(nullptr);
     delete callbacks;
     callbacks = nullptr;
     delete event_callbacks;
