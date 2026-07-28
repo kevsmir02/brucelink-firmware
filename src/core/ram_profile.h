@@ -21,8 +21,22 @@ void ramProfileStartSampler(uint32_t intervalMs);
 void ramProfileLogf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
 #define RAM_LOG(stage) ramProfileLog(stage)
-#define RAM_LOG_SAMPLER(intervalMs) ramProfileStartSampler(intervalMs)
 #define RAM_LOGF(...) ramProfileLogf(__VA_ARGS__)
+
+// The sampler is opt-in SEPARATELY from the rest of RAM logging, because it is
+// the only part with a standing cost: xTaskCreate takes its 4 KB stack from
+// internal DRAM and never gives it back. On this board the fully-loaded margin
+// (BLE API + WiFi AP + WebUI) is roughly 2.5 KB of contiguous DMA, so a
+// permanent 4 KB diagnostic task is larger than the headroom it is measuring —
+// enough on its own to stop a station associating with the AP.
+// Stage markers and RAM_LOGF stay always-on: they cost nothing at rest and they
+// are what makes failures on this board visible at all.
+// Enable with -D ENABLE_RAM_SAMPLER=1 when you specifically want a time series.
+#if defined(ENABLE_RAM_SAMPLER)
+#define RAM_LOG_SAMPLER(intervalMs) ramProfileStartSampler(intervalMs)
+#else
+#define RAM_LOG_SAMPLER(intervalMs) ((void)0)
+#endif
 
 #else
 
