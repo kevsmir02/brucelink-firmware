@@ -1,5 +1,6 @@
 #if !defined(LITE_VERSION)
 #include "attack_commands.h"
+#include "core/ram_profile.h"
 #include "core/settings.h"
 #include "core/wifi/wifi_common.h"
 #include "core/wifi/ws_events.h"
@@ -99,25 +100,47 @@ uint32_t blespamCmdCallback(cmd *c) {
     wifi_mode_t wifiModeBefore = WiFi.getMode();
     bool apWasUp = (wifiModeBefore == WIFI_MODE_AP || wifiModeBefore == WIFI_MODE_APSTA);
 
+    // Warn the companion app over the link it is about to lose, THEN drop the GATT
+    // server before either spam engine touches NimBLE. Once the API is down the
+    // memory guard has enough DMA to leave the AP alone, so control swaps to WiFi
+    // for the duration rather than disappearing entirely.
+    bool bleApiWasUp = bleApiIsEnabled();
+    if (bleApiWasUp) {
+        serialDevice->println("blespam: BLE control link suspended — reconnect over WiFi");
+        serialDevice->endOfResponse();
+        bleApiSuspend();
+    }
+
     setDeviceState("ble_spam");
+    RAM_LOG("swap attack-pre");
     if (useFastPair) {
         FastPairExploitEngine fpEngine;
         fpEngine.spamFastPairPopups(fpType, count);
     } else {
         bleSpamRunAttackByName(typeStr, count);
     }
+    RAM_LOG("swap attack-post");
     setDeviceState("idle");
 
-    // Auto-recover the AP if the guard tore it down for the spam.
+    // Auto-recover the AP if the guard tore it down for the spam. With the API
+    // suspended first this should now be a no-op — the guard passes without
+    // touching WiFi — so a "Restoring WiFi AP" line here means the swap did not
+    // buy enough contiguous DMA and is worth investigating rather than ignoring.
     if (apWasUp) {
         wifi_mode_t wifiModeAfter = WiFi.getMode();
         bool apStillUp = (wifiModeAfter == WIFI_MODE_AP || wifiModeAfter == WIFI_MODE_APSTA);
+        RAM_LOG(apStillUp ? "swap ap-survived" : "swap ap-lost");
         if (!apStillUp) {
             Serial.println("[BLE_SPAM] Restoring WiFi AP after spam");
             WiFi.mode(WIFI_AP);
             _setupAP();
+            RAM_LOG("swap ap-restored");
         }
     }
+
+    // Rebuild the control link so the app can swap back to BLE and replay from
+    // lastEventId.
+    if (bleApiWasUp) bleApiResume();
     return true;
 }
 

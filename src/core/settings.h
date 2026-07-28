@@ -111,6 +111,11 @@ void setMacAddressMenu();
 void enableBLEAPI();
 bool bleApiIsEnabled();
 
+// Free the BLE stack around a BLE attack, so control can fall back to WiFi for
+// its duration. See the comment on bleApiSuspend() for why the ordering matters.
+void bleApiSuspend();
+void bleApiResume();
+
 bool appStoreInstalled();
 
 void installAppStoreJS();

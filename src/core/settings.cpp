@@ -1688,6 +1688,51 @@ void enableBLEAPI() {
 
 bool bleApiIsEnabled() { return ble_api_enabled; }
 
+static bool ble_api_suspended = false;
+
+// Control belongs on whichever radio the attack is not using. A WiFi attack
+// leaves BLE free, so control rides BLE — proven. A BLE attack is the mirror
+// case: free the BLE stack first and control falls back to the WiFi AP.
+//
+// Freeing it early is what keeps the AP alive, and the mechanism is specific.
+// radioHasMemForBle() (core/radio_mem.h) admits a BLE attack only when the
+// largest contiguous DMA block clears RADIO_BLE_MIN_DMA_BLOCK (15 KB); when it
+// does not, its fallback calls wifiDisconnect() to free DMA — so with the API
+// still up it is THE MEMORY GUARD, not the attack, that destroys the AP.
+// Measured on smoochiee-board: fully loaded, the largest DMA block is 1,332
+// bytes and the guard cannot pass. Tearing the API down first releases 62 KB and
+// takes that block to 32,756, so the guard passes on its first check and never
+// touches WiFi.
+//
+// Ordering is also why this is not commit e2631370's reverted approach. That one
+// re-initialised the API AFTER an attack had already mangled the stack, and
+// crashed. Here BLE_API performs its own teardown while the stack is still
+// healthy, so the attack starts from a clean slate and the rebuild is a fresh
+// setup() rather than a rescue.
+//
+// ble_api_enabled is deliberately left alone: it records the user's intent, so
+// bleApiIsEnabled() stays truthful across a suspend/resume pair and the Config
+// menu toggle keeps behaving as the user expects.
+void bleApiSuspend() {
+    if (!ble_api_enabled || ble_api_suspended) return;
+    RAM_LOG("swap suspend-pre");
+    bleApi.end();
+    ble_api_suspended = true;
+    RAM_LOG("swap suspend-post");
+}
+
+void bleApiResume() {
+    if (!ble_api_suspended) return;
+    ble_api_suspended = false;
+    RAM_LOG("swap resume-pre");
+    // deinit() in BLE_API::end() is the default deinit(clearAll = false). Do NOT
+    // "fix" that to deinit(true) here: it was tried, and it tore the
+    // characteristic down while a client was still connected, so the suspend
+    // notification was lost in flight and the run failed EARLIER than without it.
+    bleApi.setup(); // re-advertises as "Bruc" and re-registers the event sink
+    RAM_LOG("swap resume-post");
+}
+
 bool appStoreInstalled() {
     FS *fs;
     if (!getFsStorage(fs)) {
