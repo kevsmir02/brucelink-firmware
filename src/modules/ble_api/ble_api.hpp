@@ -10,6 +10,8 @@ public:
     void setup();
     void end();
     void update_mtu(uint16_t mtu);
+    /** Clears per-connection state a vanished peer never cleaned up. */
+    void on_disconnect();
 
 private:
     NimBLEServer *pServer;

@@ -23,6 +23,15 @@ class BLEAPICallback : public NimBLEServerCallbacks {
 
     void onMTUChange(uint16_t MTU, NimBLEConnInfo &connInfo) override { api->update_mtu(MTU); };
 
+    // A peer that vanishes — app reloaded, out of range, radio off — never
+    // writes 0 to the CCCD, so onSubscribe is not called and the service still
+    // believes somebody is listening. Every event then notifies a dead
+    // characteristic: bleNotifyRetry burns 8 retries per chunk and
+    // notifyChunkedTo logs a failure, for every frame, forever.
+    void onDisconnect(NimBLEServer *pServer, NimBLEConnInfo &connInfo, int reason) override {
+        api->on_disconnect();
+    };
+
 public:
     explicit BLEAPICallback(BLE_API *api) : api(api) {}
 };
@@ -47,6 +56,8 @@ void BLE_API::setup() {
     g_event_service = &serial_service;
     registerEventSink(&bleEventSink);
 }
+
+void BLE_API::on_disconnect() { serial_service.setEventSubscribed(false); }
 
 void BLE_API::update_mtu(uint16_t mtu) {
     battery_service.setMTU(mtu);
