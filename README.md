@@ -1,9 +1,69 @@
 ![Bruce Main Menu](./media/pictures/bruce_banner.jpg)
 
-# :shark: Bruce
+# :shark: Bruce — Companion Fork
+
+> **This is a personal, unofficial fork of [Bruce](https://github.com/pr3y/Bruce).**
+> It is **not** the official firmware, it is **not** supported by the Bruce team,
+> and you should not report problems with it to them. For the real thing, go to
+> [bruce.computer](https://bruce.computer/flasher).
+
+## :iphone: What this fork is for
+
+I am building a **mobile companion app** for Bruce, and this fork contains the
+firmware-side changes that make the device drivable from a phone. Upstream Bruce
+is designed to be operated from its own screen and buttons; this fork adds a
+remote control surface on top of that, without removing anything.
+
+The short version of why it needed firmware changes at all:
+
+- Every Wi‑Fi attack in Bruce tears down the Wi‑Fi stack — so controlling the
+  device over the existing Web UI destroys the connection the moment you use it.
+- BLE survives Wi‑Fi attacks, so **BLE became the primary control path**, with
+  Wi‑Fi kept for bulk transfers (screenshots, file listing).
+- BLE and Wi‑Fi compete for the same scarce internal DMA memory, so most of the
+  work is about **never running both radios at once** and swapping cleanly
+  between them.
+
+What that added, concretely: a BLE GATT command/event transport, a `/ws` event
+stream, remote-callable CLI verbs for the attacks, an extended `/systeminfo`, and
+a pile of crash fixes found along the way.
+
+**Documentation:**
+
+| | |
+|---|---|
+| [`docs/bruce-companion-api.md`](./docs/bruce-companion-api.md) | The app↔firmware contract — UUIDs, framing, endpoints, event frames, verbs |
+| [`docs/FIRMWARE_CHANGES.md`](./docs/FIRMWARE_CHANGES.md) | What changed inside the firmware and why, including the approaches that failed |
+
+## :warning: What you should expect from this fork
+
+Please read this before flashing anything.
+
+- **Tested on exactly one board: Smoochiee V2 (ESP32‑S3‑N16R8)** — 16 MB flash,
+  8 MB OPI PSRAM, PlatformIO env `smoochiee-board`. That is the only hardware
+  this has ever run on.
+- **I cannot guarantee it works on any other device.** Upstream Bruce supports a
+  long list of M5Stack, Lilygo and other boards. This fork makes **no claim**
+  about any of them. The radio-coexistence work in particular is tuned to the
+  memory profile of one specific chip, and boards with less internal DRAM or no
+  PSRAM may behave differently or not work at all.
+- **This is a personal project. Updates are not guaranteed** — no release
+  schedule, no support commitment, no promise that any given commit builds for
+  your board. I do intend to keep working on it as I get the remaining modules,
+  but treat that as intent, not a roadmap.
+- **Things may break.** This fork touches BLE lifecycle, Wi‑Fi teardown and boot
+  paths. It fixed several crashes; it may well have introduced others.
+
+If you need something dependable, use the official firmware.
+
+## :books: About the upstream project
 
 Bruce is a versatile ESP32 firmware that supports a ton of offensive features focusing on facilitating Red Team operations.
 It also supports M5stack and Lilygo products and works great with Cardputer, Sticks, M5Cores, T-Decks and T-Embeds.
+
+Everything below this line is upstream Bruce's own documentation. The feature
+lists and device-support table describe **upstream**, not what has been verified
+in this fork.
 
 **Check our fully open-source hardware too:** https://bruce.computer/boards
 
@@ -276,5 +336,39 @@ modules are derived from other projects. See [THIRD_PARTY.md](./THIRD_PARTY.md)
 for third-party attribution and copyleft-compliance details.
 
 ## :construction: Disclaimer
+
+### This fork
+
+**This firmware is published for educational and research purposes only.**
+
+It is a personal learning project: the point of it is understanding how ESP32
+radios, BLE/Wi‑Fi memory contention and embedded transports actually behave, and
+building a companion app against that. It is intended solely for **legal,
+authorized security testing** — on hardware and networks you own, or that you have
+explicit written permission to test.
+
+Wireless attacks against equipment, networks or people without authorization are
+illegal in most jurisdictions. Deauthentication, rogue access points, credential
+capture and BLE advertisement spam can all be criminal offences and can disrupt
+systems other people depend on. **Do not use this on anything that is not yours.**
+
+By downloading, building, flashing or using this fork, you accept that:
+
+- You are solely responsible for how you use it and for complying with all laws
+  and regulations that apply to you, including radio/RF regulations.
+- It is provided **free of charge**, **as-is**, with **no warranty of any kind**,
+  express or implied, and with **no guarantee of updates, support, fitness for any
+  purpose, or that it will work on your hardware at all**.
+- The author accepts **no liability whatsoever** for any damage, data loss,
+  bricked hardware, service disruption, legal consequence, or any other harm
+  arising from its use or misuse — see the warranty and liability disclaimers in
+  the [AGPL‑3.0 license](./LICENSE), §§15–17, which govern.
+- No affiliation with or endorsement by the upstream Bruce project or its
+  maintainers is claimed or implied. Do not direct issues with this fork to them.
+
+If you are not sure whether something you want to do with this is legal, the
+answer is that you should not do it.
+
+### Upstream Bruce
 
 Bruce is a tool for cyber offensive and red team operations, distributed under the terms of the Affero General Public License (AGPL). It is intended for legal and authorized security testing purposes only. Use of this software for any malicious or unauthorized activities is strictly prohibited. By downloading, installing, or using Bruce, you agree to comply with all applicable laws and regulations. This software is provided free of charge, and we do not accept payments for copies or modifications. The developers of Bruce assume no liability for any misuse of the software. Use at your own risk.

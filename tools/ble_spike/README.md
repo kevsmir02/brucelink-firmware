@@ -11,8 +11,9 @@ in ~30 seconds instead of an Android build cycle.
 python3 -m venv .venv && .venv/bin/pip install bleak
 ```
 
-The device must be advertising as `Bruc`. The BLE API is **not** persisted across
-reboots, so after every flash: **Config → Toggle BLE API** on the device.
+The device must be advertising as `Bruc`. Since `623d4d26` the BLE API state is
+persisted (`bleApiAutoStart`) and re-armed at boot, so **Config → Toggle BLE API**
+is only needed once — but a flash that wipes the config file resets it to off.
 
 ## Running
 

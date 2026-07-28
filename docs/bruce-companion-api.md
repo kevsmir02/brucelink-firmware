@@ -1,54 +1,133 @@
 # Bruce Companion App — API Contract
 
-**Source of truth:** `docs/superpowers/specs/2026-07-25-bruce-companion-app-design.md` §5. This document is the verbatim contract the `bruce-companion-app` repo vendors. Bump the version line below whenever this contract changes.
+**Source of truth:** this file, audited against the firmware tree. Where any
+earlier design note disagrees with what is written here, the code wins. See
+[FIRMWARE_CHANGES.md](./FIRMWARE_CHANGES.md) for *why* the firmware was changed;
+this document covers *what the interface is*.
 
-**Contract version:** 1.3 (blespam auto-recover verified — WiFi AP restarts after spam, all 7 /ws frames captured)
+**Contract version:** 2.0 — audited against `623d4d26` (2026-07-28).
+Fork point from upstream Bruce: `59e83bfb` (2026-07-23); companion work starts at
+`373fb5d8` (2026-07-25). Bump this line whenever the contract changes.
+
+**How to read this doc.** Every claim below is either code (file:line given) or a
+measurement (device + date given). Anything not yet verified on hardware is marked
+**UNVERIFIED**. Nothing here is aspirational — planned-but-unbuilt items live in
+§7.
 
 ---
 
-## 5. API Specification (firmware↔app contract)
+## 1. Transports
 
-Pinned here. Copied to `docs/bruce-companion-api.md` at implementation time.
+Two control transports, both speaking **the same CLI command bus** (`SerialCli::parse`).
+Every verb works identically over either.
 
-### 5.1 Transport
-- Wi-Fi (Bruce AP or shared LAN), HTTP REST + WebSocket.
-- Auth: cookie `BRUCESESSION=<token>` after `POST /login`. App also sends `Authorization: Bearer <token>` (patched into `checkUserWebAuth` `webInterface.cpp:171` to accept bearer in addition to cookie — ~3 lines, ships with the patch file).
-- mDNS: `http://<host>.local/` discovery.
+| | BLE GATT serial | WiFi HTTP |
+|---|---|---|
+| Role | **Primary** control + events | Bulk transfer (screenshots, files) |
+| Survives a WiFi attack | yes | no — the attack tears the server down |
+| Survives a BLE attack | no — suspended for the duration | yes |
+| Request/response | CLI char, EOT-terminated | `POST /cm` (fire-and-forget, no output) |
+| Events | event char (`d555ed98-…`) | `/ws` WebSocket |
 
-### 5.2 Existing endpoints (unchanged, reused)
+**Why BLE is primary** (`src/main.cpp:491`): every WiFi attack destroys the medium
+an HTTP connection depends on. A BLE connection survives both `deauth` and Evil
+Portal and carries CLI traffic throughout — verified on smoochiee-board 2026-07-27.
+
+**The two transports are not meant to run simultaneously.** Fully loaded with BLE
+API + WiFi AP + WebUI the board has ~15 KB free, and a single associated station
+drives that to a few hundred bytes, at which point notifies truncate and HTTP dies
+(`src/core/serial_commands/wifi_commands.cpp:58`). Use `webui -off` to hand the
+WiFi memory back when done with bulk transfer, `webui -bg` to bring it back.
+
+---
+
+## 2. BLE GATT serial (primary)
+
+| Item | Value | Source |
+|---|---|---|
+| Advertised name | `Bruc` | `ble_api.cpp:67` |
+| Service UUID | `4371ec0b-3d43-49f9-b731-7c72a4a7bb91` | `BLESerialService.cpp:66` |
+| CLI characteristic | `d555ed97-bf2a-4f46-b3eb-d1fcdd7325e9` — READ \| NOTIFY \| WRITE | `BLESerialService.cpp:69` |
+| Event characteristic | `d555ed98-bf2a-4f46-b3eb-d1fcdd7325e9` — READ \| NOTIFY | `BLESerialService.cpp:79` |
+| Battery service | `0x180F` / `0x2A19` (READ \| NOTIFY) | `BatteryService.cpp` |
+| Response terminator | `0x04` (EOT) | `BLESerialService.h:22` |
+
+### 2.1 Framing
+
+**Commands** are newline-terminated writes to the CLI characteristic. The firmware
+buffers RX in a 512-byte ring and only parses on a complete line
+(`serialcmds.cpp:57` uses `hasLine('\n')`, not `available()`), so a command split
+across several writes reassembles correctly.
+
+**Responses** stream back as notifies on the CLI characteristic, then a human
+prompt `"# "`, then a single `0x04` EOT byte. Read until EOT. Do **not** use the
+`"# "` prompt as a terminator — any output line beginning with `# ` (a dumped
+markdown file, a commented config) would truncate the response and desynchronise
+every command after it.
+
+**Chunking:** notifies are split to `negotiated_MTU - 3` bytes
+(`BLESerialService.cpp:150`). **The app must call `requestMTU(247)` on connect** —
+Android's default 23 gives 20-byte chunks. Measured 2026-07-27: BlueZ negotiates
+128 (125-byte chunks); nRF Connect on Android never requests more and stays at 23.
+
+**Truncation is reported in-band.** If a chunk exhausts its notify retries (device
+out of memory), the reply is aborted and `endOfResponse()` prepends
+`\r\n[TRUNCATED: device low on memory]\r\n` before the EOT
+(`BLESerialService.cpp:178`). Treat this as a distinct error from a parse failure.
+
+**No request IDs.** The CLI carries none, so responses correlate **positionally**.
+Do not pipeline commands unless you are tracking order yourself.
+
+### 2.2 Events
+
+Event frames go out on their own notify-only characteristic so async JSON never
+interleaves with CLI stdout. Frames are `\n`-delimited; the stream is chunked the
+same way, so split on newline after reassembling.
+
+Events are **dropped, not queued**, when nobody is subscribed
+(`BLESerialService.cpp:196`) and the subscription is cleared on peer disconnect
+(`ble_api.cpp:79`). Resume via `lastEventId` — see §4.3.
+
+---
+
+## 3. WiFi HTTP (bulk transfer)
+
+- Bruce AP or shared LAN. mDNS `http://<host>.local/`.
+- Auth: cookie `BRUCESESSION=<token>` after `POST /login`, **or**
+  `Authorization: Bearer <token>` (`webInterface.cpp:176` — checked before the
+  cookie; `/login` also returns `{token}` as JSON).
+
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/cm?cmnd=<verb>` | Universal command trigger — fires any registered CLI verb |
+| POST | `/cm?cmnd=<verb>` | Queue any CLI verb. **POST only** (`webInterface.cpp:532`) — GET 404s |
 | GET | `/getscreen` | Binary TFT draw-log pull |
-| GET | `/systeminfo` | JSON system info (extended, see §5.4) |
+| GET | `/systeminfo` | JSON system info (§3.1) |
 | GET | `/listfiles?folder=&fs=` | Directory listing |
 | GET | `/file?name=&action=&fs=` | download/image/delete/create/createfile/edit |
 | POST | `/edit` | write file |
 | POST | `/upload` | upload file |
 | POST | `/rename` | rename file/folder |
-| POST | `/login` `{user,pwd}` | → `Set-Cookie BRUCESESSION=`, also returns `{token}` JSON |
+| POST | `/login` `{user,pwd}` | → `Set-Cookie BRUCESESSION=`, plus `{token}` |
 | GET | `/logout` | invalidate session |
 | GET | `/reboot` | `ESP.restart()` |
-| WS | `/ws` | Event stream (new — §5.5) |
+| WS | `/ws` | Event stream (§4) |
 
-### 5.3 New CLI verbs (added by `attack_commands.cpp`, §4.3)
-```
-evilportal <ssid> <ch> [template]      payload cred stream via §5.5 (or portal-AP poll fallback)
-karma
-deauth <target|ssid>
-blespam <type> <count>                types: fastpair|ibeacon|apple|android|windows|ninebot
-blesniffer
-reverseshell
-pwngrid
-ble api on|off
-ap_info <ssid>
-```
+`/cm` returns `200 "command <verb> queued"` on accept, `400 "command failed…"` when
+the queue is full. **It never returns command output** — output goes to `/ws` as
+`log` frames. Use the BLE CLI characteristic when you need the actual reply text.
 
-### 5.4 Extended `/systeminfo`
+`/cm cmnd=nav <sel|esc|up|down|next|prev> [ms]` is special-cased: it synthesises a
+button press and returns immediately without queueing.
+
+### 3.1 `/systeminfo`
+
+Built by `buildSystemInfoJson()` (`src/core/system_info.cpp`), also reachable as
+the `systeminfo` CLI verb over BLE.
+
 ```json
 {
   "BRUCE_VERSION": "dev",
-  "SD": {"free":"…","used":"…","total":"…"},
+  "SD":       {"free":"…","used":"…","total":"…"},
   "LittleFS": {"free":"…","used":"…","total":"…"},
   "capabilities": {
     "usb_as_hid": true, "has_screen": true, "lite_version": false,
@@ -57,106 +136,248 @@ ap_info <ssid>
     "has_buzz": true, "has_rgb_led": true, "has_mic": true
   },
   "battery_pct": 73, "charging": false,
-  "wifi_mode": "STA", "ip": "192.168.1.42",
+  "wifi_mode": 2, "ip": "0.0.0.0",
   "free_heap": 142336, "psram": true
 }
 ```
-Capability flags are read from compile-time `#define`s the patch exposes; the app uses them to grey-out absent-feature buttons.
 
-### 5.5 WebSocket event frames `/ws`
-Server pushes JSON lines; client sends `{cmd:"subscribe", since:<lastEventId>}` on connect. Frame union:
+Field notes — these bit us, read them:
 
-```ts
-type EventFrame =
-  | { id:number, type:'cred',     ssid:string, fields:{[k:string]:string}, valid?:boolean, ts:number }
-  | { id:number, type:'ble_progress', msg:string, color?:string, count?:number }
-  | { id:number, type:'ble_result',   success:boolean, msg:string }
-  | { id:number, type:'host',     mac:string, ip:string, vendor?:string }
-  | { id:number, type:'ap',       ssid:string, bssid:string, ch:number, rssi:number, enc:string }
-  | { id:number, type:'packet',   ch:number, rssi:number, len:number, type:string }
-  | { id:number, type:'log',      line:string, level?:'info'|'warn'|'err' }
-  | { id:number, type:'state',    device_state:string };  // idle|attacking|portal|sniffer|…
-```
-
-**Default-shipped hooks** (in the patch file): `ble_progress`/`ble_result` (from `showAttackProgress`/`showAttackResult`), `log` (from `handleSerialCommands` CLI output forward), `state` (from a small device-state setter). **Optional hooks** (time-permitting): `cred` (Mission 1 upgrade), `host`/`ap`/`packet` (Mission 3 upgrade).
-
-### 5.6 Evil Portal creds endpoint (existing, used unless the `cred` `/ws` hook is shipped)
-Poll `GET http://<portal.softAPIP>/<getCredsEndpoint>` (default configurable via `bruceConfig.evilPortalEndpoints`). Parse the returned HTML `<ol>` of `key: value<br>` lines into `EventFrame.cred`-shaped objects on the app side. Fallback CSV pull via `/file` after mission end.
+- **`wifi_mode` is an integer**, the raw `WiFi.getMode()` enum
+  (`system_info.cpp:78`): `0`=OFF, `1`=STA, `2`=AP, `3`=APSTA. It is **not** the
+  string `"STA"`.
+- **`ip` is `WiFi.localIP()`** (`system_info.cpp:79`), which reads `0.0.0.0` in AP
+  mode. For the AP address use the known `192.168.4.1`.
+- `has_pn532`, `has_fm`, `has_eth` are **hardcoded `false`**
+  (`system_info.cpp:47,58,59`) regardless of the hardware. Do not trust them.
+- Every other capability flag is a real compile-time `#define` check.
 
 ---
 
-## Verbs shipped by the patch
+## 4. Event frames
 
-| Verb | Blocks serial? | One-tap? | Telemetry | Notes |
-|------|---------------|----------|-----------|-------|
-| `ble api on\|off` | no | yes | control plane | toggles BLE_API GATT server |
-| `evilportal <ssid> <ch> [template]` | yes (monopolizes radio) | yes | 🥇 live & programmatic | gateway defaults to 192.168.4.1 (phone captive-portal compat); poll portal-AP creds endpoint or /ws cred hook |
-| `blespam <type> <count>` | no (returns after spam cycle) | yes for fastpair_* | 🥈 /ws ble_progress | types: fastpair_regular, fastpair_fun, fastpair_prank, fastpair_custom, menu |
-| `karma` | **YES — blocks** | menu-dispatcher | 🥉 fire-and-forget | opens TFT menu; user must dismiss on device |
-| `deauth [<target>]` | **YES — blocks** | menu-dispatcher (target ignored in v1) | 🥉 fire-and-forget | opens TFT menu; user must dismiss on device |
-| `blesniffer` | **YES — blocks** | menu-dispatcher | 🥈 | opens BLE Suite menu; user must dismiss on device |
-| `ap_info` | **YES — blocks** | one-tap but blocks | 🥈 | shows AP info on TFT; blocks until user dismisses. Only works in STA mode (not AP mode) |
-| `reverseshell` | **YES — blocks** | one-tap | 🥉 | starts reverse shell listener; blocks serial task |
-| `pwngrid` | **YES — blocks** | one-tap | 🥉 | starts pwnagotchi/Brucegotchi; blocks serial task |
+Same JSON on both transports (`/ws` and the BLE event characteristic) — one
+`pushWsEvent()` builds the frame and fans it out (`ws_events.cpp:56`).
 
-### §5.7 Blocking Verbs (critical for app design)
+### 4.1 Frames actually shipped
 
-**The `/cm` endpoint queues commands on a depth-2 FreeRTOS queue** (`cmdQueue`). The serial-commands task processes them one at a time. Verbs marked "YES — blocks" above enter a `loopOptions()` or equivalent blocking loop on the TFT that **does not return until the user interacts with the device's physical buttons**. While blocked:
+```ts
+type EventFrame =
+  | { id:number, type:'state',        device_state:string }
+  | { id:number, type:'log',          line:string, level:'info'|'warn'|'err' }
+  | { id:number, type:'ble_progress', msg:string }
+  | { id:number, type:'ble_result',   success:boolean, msg:string };
+```
 
-- The serial task is occupied → the `cmdQueue` fills up → **all subsequent `/cm` commands return HTTP 400** ("command failed") until the device-side loop is dismissed.
-- The `/ws` stream stays alive (the AsyncWebServer runs on a separate task) but no new `log`/`state` frames are pushed for the blocked command.
+`device_state` values emitted today: `idle`, `portal`, `ble_spam`
+(`attack_commands.cpp:51,53,114,123`). No other verb sets state.
 
-**App design implications:**
-- Non-blocking verbs (`ble api`, `blespam`, `evilportal`) are safe to fire-and-forget from the app — they return immediately or enter autonomous loops that don't block the serial task.
-- Blocking verbs should be presented in the app with a **"Requires on-device interaction"** badge, and the app should **not** send any subsequent commands until the device returns to idle (detectable via `/ws` `state` frame `device_state:"idle"` or by polling `/systeminfo`).
-- **Workaround for future patch:** run blocking verbs in a dedicated FreeRTOS task so the serial task stays free — not in this patch.
+`log` frames are emitted for every CLI command dispatch and its result
+(`serialcmds.cpp:45,52,64,68`) — `COMMAND: <text>` then `[CLI] Result: TRUE|FALSE`.
+That is the only `log` source; general CLI stdout is **not** forwarded to `/ws`.
 
-### §5.8 `/cm` HTTP method
+`ble_progress` / `ble_result` come from `showAttackProgress` / `showAttackResult`
+(`BLE_Suite.cpp:5994,6047`) and the spam loop (`ble_spam.cpp:1558,1578,1585`).
 
-**`/cm` accepts POST only** (registered as `server->on("/cm", HTTP_POST, ...)` at `webInterface.cpp:543`). GET requests return 404. The companion app must use `POST /cm?cmnd=<verb>`.
+**Not implemented:** `cred`, `host`, `ap`, `packet`. The v1.x contract listed them
+in the frame union; no code emits them. Evil Portal creds must be pulled per §6.
 
-## `/ws` event frames shipped
+### 4.2 WebSocket connect
 
-- `state` — `{type:'state', device_state:'idle|portal|ble_spam|…'}`
-- `ble_progress` — `{type:'ble_progress', msg:string}`
-- `ble_result` — `{type:'ble_result', success:boolean, msg:string}`
-- `log` — `{type:'log', line:string, level?:'info'|'warn'|'err'}`
-- Plus the initial connect ack: `{id:0, type:'state', device_state:'idle'}`
+On connect the server pushes one frame with the **current** event ID and state
+(`ws_events.cpp:27`):
 
-**Verified on live device:** `blespam fastpair_regular 3` produces a 7-frame sequence: `log` (COMMAND) → `state` (ble_spam) → `ble_progress` (Starting) → `ble_progress` (Sent N) → `ble_progress` (completed) → `state` (idle) → `log` (Result: TRUE).
+```json
+{"id":<current wsEventId>,"type":"state","device_state":"idle"}
+```
 
-### §5.9 Hybrid BLE+WiFi Coexistence (verified on hardware)
+The id is `0` only on a fresh boot, not on every connect.
 
-**BLE API GATT server auto-starts at boot** (`main.cpp:setup()` calls `enableBLEAPI()` before WiFi AP init) so the BT controller grabs its ~15KB internal DMA block first. The device advertises as "Bruc" from the moment it boots.
+**`{cmd:"subscribe", since:…}` is ignored.** The v1.x contract specified it; the
+handler is a no-op (`ws_events.cpp:29`). There is no server-side replay — the app
+re-fetches `/systeminfo` to resume.
 
-**Verified coexistences (live on smoochiee-board):**
-- ✅ BLE API GATT server + WiFi AP + Web UI HTTP server (all three simultaneously, indefinitely)
-- ✅ HTTP endpoints (`/systeminfo`, `/getscreen`, `/cm`) work while BLE API is active
-- ✅ `/ws` event stream works while BLE API is active
-- ✅ Bearer auth (401 negatives) works while BLE API is active
-- ✅ "Bruc" is visible in BLE scans (confirmed on PC; iPhone 8 did not see it — likely iOS BLE privacy filtering, not a firmware issue)
+### 4.3 Event IDs across a transport switch
 
-**Known conflicts (documented for app design):**
-- ⚠️ **`blespam` may briefly drop the WiFi AP.** `spamFastPairPopups` calls `BLEStateManager::initBLE` → `radioHasMemForBle()` which is a **crash guard** — if internal DMA < 15KB, it tears down WiFi to free memory for the BT controller (PSRAM can't back BT DMA; this is a hardware constraint, not a bug). The firmware **auto-recovers**: after the spam finishes and BLE deinit's (freeing DMA), the AP is restarted via `WiFi.mode(WIFI_AP)` + `_setupAP()`. **App handling:** if WiFi drops mid-spam, show "Wi-Fi radio busy — reconnecting…" and auto-reconnect. Verified on hardware: all 7 `/ws` frames captured + WiFi returned to 200 within seconds.
-- ⚠️ **WiFi attacks monopolize the radio.** `evilportal`, `karma`, `deauth`, `sniffer` call `cleanlyStopWebUiForWiFiFeature()` which kills the HTTP server. After the attack ends, the Web UI must be manually restarted on the device. During the attack, only BLE control (GATT serial) works.
-- ⚠️ **BLE API GATT server + BLE attacks don't coexist.** `blespam`/`blesniffer` re-init the NimBLE stack, conflicting with a running BLE API server. **App mitigation:** don't enable `ble api on` before a BLE attack; use WiFi as the control path for BLE attacks. BLE API is only useful as fallback during WiFi attacks (when HTTP is dead).
+`wsEventId` increments **unconditionally**, even when the WebSocket is gone
+(`ws_events.cpp:62`). A WiFi attack tearing the WebUI down is exactly the case BLE
+covers, so the BLE stream carries a gap-free continuation of the same ID space.
+An app tracking `lastEventId` can detect what it missed across a switch — but it
+cannot ask for a replay (§4.2); it can only detect the gap.
 
-### §5.10 BLE GATT Serial (control transport)
+---
 
-The BLE API GATT server exposes a serial-over-BLE channel:
+## 5. Verbs
 
-| Item | Value |
-|---|---|
-| Service UUID | `4371ec0b-3d43-49f9-b731-7c72a4a7bb91` |
-| Serial Characteristic UUID | `d555ed97-bf2a-4f46-b3eb-d1fcdd7325e9` |
-| Battery Service UUID | `0x180F` (standard) |
-| Battery Characteristic UUID | `0x2A19` (READ\|NOTIFY, updates/min) |
-| Device Name | `Bruc` |
-| Serial char properties | READ \| NOTIFY \| WRITE |
+Registered by `createAttackCommands()` (`src/core/serial_commands/attack_commands.cpp:177`)
+unless noted.
 
-**Protocol:** Write newline-terminated CLI commands to the serial characteristic; receive CLI output via NOTIFY. This is the **same `SerialCli::parse` command bus** as `/cm` — every verb registered through `createAttackCommands` + all existing CLI commands work over BLE serial identically.
+| Verb | Blocks serial? | Telemetry | Notes |
+|---|---|---|---|
+| `ble api on\|off` | no | — | toggles the GATT server; persists across reboot (§5.3) |
+| `evilportal <ssid> <ch> [template]` | yes (monopolizes radio) | `state` | defaults: ssid `Free Wifi`, ch `6` (out-of-range → 6); gateway forced to `192.168.4.1` for phone captive-portal compat |
+| `blespam <type> <count>` | no | `state`, `ble_progress`, `ble_result` | types in §5.1; count < 1 → 10 |
+| `systeminfo` | no | — | same JSON as `GET /systeminfo`; the way to read it over BLE |
+| `free` | no | — | one-line heap report incl. **largest contiguous DMA block**, which is what actually gates radio init |
+| `webui -off` | no | — | stops the WebUI **and its AP**; frees the memory for BLE |
+| `webui -bg` | no | — | starts the WebUI and returns instead of holding the screen until ESC |
+| `karma` | **YES** | — | opens the TFT menu; needs on-device dismissal |
+| `deauth [<target>]` | **YES** | — | opens the TFT menu; **`target` is parsed but ignored** (`attack_commands.cpp:152`) |
+| `blesniffer` | **YES** | — | opens the BLE Suite menu; needs on-device dismissal |
+| `ap_info` | **YES** | — | STA mode only; blocks until dismissed |
+| `reverseshell` | **YES** | — | starts the listener; blocks the serial task |
+| `pwngrid` | **YES** | — | starts Brucegotchi; blocks the serial task |
 
-**Companion app v1 transport strategy (hybrid):**
-1. **Primary: WiFi** (`POST /cm`, `/ws`, `/getscreen`, `/systeminfo`, file endpoints) — used when WiFi AP is available
-2. **Fallback: BLE GATT serial** — used when WiFi drops (during a WiFi attack) or when the device is not running its AP
-3. **Switch logic:** app detects WiFi loss (HTTP timeout) → switches to BLE serial for stop/status commands → when WiFi returns (detected via BLE serial `state` frame or periodic probe), switches back to WiFi for bulk data
+`webui`, `systeminfo` and `free` live in `wifi_commands.cpp` / `util_commands.cpp`,
+not `attack_commands.cpp`.
+
+### 5.1 `blespam` types
+
+Two engines behind one verb (`attack_commands.cpp:74`):
+
+- **FastPair popup engine:** `fastpair_regular`, `fastpair_fun`, `fastpair_prank`,
+  `fastpair_custom`
+- **Generic spam engine** (`bleSpamAttackTypeFromName`, `ble_spam.cpp:1592`):
+  `apple`, `android`, `ibeacon`, `samsung`, `windows` (alias `swiftpair`),
+  `random` (alias `all`)
+- **`menu`** — opens the interactive on-device UI and drives its own radio
+  lifecycle (no transport swap)
+
+There is no bare `fastpair` and no `ninebot`, despite the v1.x contract listing
+both. Unknown types are rejected **before** any radio teardown, so a typo does not
+flap the AP.
+
+### 5.2 Blocking verbs
+
+`/cm` queues onto a **depth-2** FreeRTOS queue (`serialcmds.cpp:91`) drained one at
+a time by the serial task. Verbs marked **YES** enter a `loopOptions()` on the TFT
+that does not return until the user presses a physical button. While blocked:
+
+- the queue fills → all further `/cm` calls return **HTTP 400**;
+- `/ws` stays alive (AsyncWebServer is a separate task) but no new frames are
+  pushed for the blocked command.
+
+App handling: badge these verbs "Requires on-device interaction" and send nothing
+further until `device_state` returns to `idle`. Note the blocking verbs do **not**
+emit a `state` frame at all, so the only reliable idle signal is the next `/cm`
+succeeding, or a `free`/`systeminfo` round-trip over BLE.
+
+A future patch could run them in a dedicated task; not done.
+
+### 5.3 BLE API persistence and boot
+
+`ble api on|off` (and the Config-menu toggle — both go through `enableBLEAPI()`)
+writes `bleApiAutoStart` to the config file (`settings.cpp:1690`). At the **end** of
+`setup()`, after WiFi init, the firmware re-arms the GATT server if that flag is set
+(`main.cpp:581`). Default is `0` — a device that has never been told `ble api on`
+boots without it.
+
+This is **not** the reverted `eb05177b` behaviour. That commit started BLE
+unconditionally *before* WiFi init to win the DMA race and was reverted in
+`e2631370` when it crashed. The current path is opt-in, runs last, and relies on
+the two radios never being loaded at once.
+
+`bleApiSuspend()` / `bleApiResume()` deliberately do **not** touch the persisted
+flag — a swap around an attack is not the user changing their mind
+(`settings.cpp:1731`).
+
+---
+
+## 6. Evil Portal credentials
+
+No `cred` event frame exists (§4.1). Poll
+`GET http://<portal.softAPIP>/<getCredsEndpoint>` (endpoint configurable via
+`bruceConfig.evilPortalEndpoints`) and parse the returned HTML `<ol>` of
+`key: value<br>` lines app-side. Fallback: CSV pull via `/file` after the mission
+ends.
+
+The portal binds port 80 with `SO_REUSEADDR` (`7de5b1b9`) so it serves pages
+immediately after the WebUI has released the port.
+
+---
+
+## 7. Radio coexistence — measured
+
+Everything in this section is a hardware measurement on **smoochiee-board**
+(no PSRAM available to BT), 2026-07-27/28.
+
+### 7.1 The constraint
+
+`radioHasMemForBle()` (`core/radio_mem.h`) admits a BLE attack only when the
+**largest contiguous DMA-capable block** clears `RADIO_BLE_MIN_DMA_BLOCK` (15 KB).
+PSRAM cannot back BT DMA. When the check fails its fallback calls
+`wifiDisconnect()` to free memory — so with the BLE API up it is **the memory
+guard, not the attack**, that destroys the AP. This is a crash guard, not a bug:
+bypassing it half-initialises `esp_bt_controller_init` and panics (tried and
+reverted, `e2631370`).
+
+Free heap alone does not predict this. Use `free`, which reports the largest
+contiguous DMA block explicitly.
+
+Measured, fully loaded (BLE API + AP + WebUI): largest DMA block **1,332 bytes** —
+the guard cannot pass. After `bleApiSuspend()` releases ~62 KB: **32,756 bytes** —
+the guard passes on its first check and never touches WiFi.
+
+### 7.2 BLE attacks: automatic transport swap
+
+`blespam` handles this itself (`attack_commands.cpp:107`):
+
+1. notifies the client `blespam: BLE control link suspended — reconnect over WiFi`,
+   flushes with EOT;
+2. `bleApiSuspend()` — frees the BLE stack while it is still healthy;
+3. runs the spam;
+4. restores the AP **only if** it was somehow torn down anyway (a
+   `[BLE_SPAM] Restoring WiFi AP` line means the swap did not free enough — worth
+   investigating, not ignoring);
+5. `bleApiResume()` — fresh `setup()`, re-advertises as `Bruc`, re-registers the
+   event sink.
+
+**App handling:** on that suspend notice, switch to WiFi; when `Bruc` re-advertises,
+switch back and reconcile via `lastEventId`. The v1.x advice — "don't enable
+`ble api on` before a BLE attack" — is obsolete; the firmware does it for you.
+
+### 7.3 WiFi attacks: no swap, control stays on BLE
+
+`evilportal`, `karma`, `deauth`, `blesniffer` call
+`cleanlyStopWebUiForWiFiFeature()` (`webInterface.cpp:66`), which stops the HTTP
+server **and drops AP mode**. The WebUI does not come back on its own. BLE control
+survives the whole attack (verified for `deauth` and Evil Portal, 2026-07-27).
+
+**App handling:** expect HTTP to die; drive the attack over BLE; re-arm the WebUI
+afterwards with `webui -bg` rather than asking the user to walk to the device.
+
+### 7.4 Known-good / known-bad
+
+- ✅ BLE API + WiFi AP + WebUI can all be *up* simultaneously — but see §1: the
+  margin is ~15 KB and one associated station consumes it. Treat simultaneous
+  operation as a transition state, not a steady state.
+- ✅ HTTP (`/systeminfo`, `/getscreen`, `/cm`), `/ws`, and Bearer-auth 401s all
+  work while the BLE API is active.
+- ✅ `Bruc` visible in BLE scans from a PC. An iPhone 8 did not see it — likely iOS
+  BLE privacy filtering. **UNVERIFIED** on other iOS devices.
+- ❌ BLE API + a BLE attack cannot coexist; handled by §7.2's swap.
+
+### 7.5 Diagnostics
+
+`RAM_LOG()` stage markers are compiled in with `-D ENABLE_RAM_LOGGING` and mirrored
+to UART0 (the native USB-CDC `Serial` on this board usually reaches nobody). The
+periodic **sampler is separately opt-in** via `-D ENABLE_RAM_SAMPLER=1` because its
+4 KB task stack comes out of internal DRAM — larger than the ~2.5 KB fully-loaded
+margin it would be measuring (`ram_profile.h:26`).
+
+Bench scripts live in `tools/ble_spike/` (`spike_transport.py`, `spike_events.py`,
+`spike_swap.py`, `spike_suspend.py`, `probe_verbs.py`, `heap_poll.py`) — they
+exercise the same transport semantics the app will, from a Linux laptop over BlueZ,
+without an app build. See `tools/ble_spike/README.md`.
+
+---
+
+## 8. Not built
+
+Listed so nobody plans against them:
+
+- `cred`, `host`, `ap`, `packet` event frames.
+- `/ws` `{cmd:"subscribe", since:…}` and any server-side event replay.
+- `deauth <target>` targeting — the argument is accepted and discarded.
+- `state` frames for any verb other than `evilportal` and `blespam`.
+- Non-blocking execution of the menu-dispatcher verbs.
