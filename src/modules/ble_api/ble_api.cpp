@@ -92,7 +92,21 @@ void BLE_API::end() {
 
     battery_service.end();
     serial_service.end();
-    BLEDevice::deinit();
+
+    // Let anything already queued reach the host before the stack goes away.
+    // An earlier attempt at the deinit(true) below was reverted because the
+    // "control link suspended" notify vanished — it was still in flight when
+    // the characteristic was freed underneath it.
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    // clearAll = true. The default deinit() stops the stack but LEAVES the
+    // server, services and characteristics allocated, so the next setup()
+    // creates a second set with the same UUIDs. Measured across arm/disarm
+    // cycles: 2 then 3 duplicate CLI characteristics, advertising data
+    // overflowing with "Cannot add UUID, data length exceeded", and clients
+    // unable to write without naming an explicit handle. Everywhere else in the
+    // firmware clears fully (BLEStateManager::deinitBLE).
+    NimBLEDevice::deinit(true);
     serialDevice = &USBserial;
 }
 #endif
