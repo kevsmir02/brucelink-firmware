@@ -141,14 +141,24 @@ async def cycle(n: int, attack_seconds: float) -> bool:
 async def main():
     cycles = int(sys.argv[1]) if len(sys.argv) > 1 else 3
     attack_seconds = float(sys.argv[2]) if len(sys.argv) > 2 else 120.0
+    # Soak mode keeps going after a failure. Repeated NimBLE teardown/rebuild
+    # fragments the heap, and the question a soak answers is whether the largest
+    # free block plateaus or keeps walking down toward RADIO_BLE_MIN_DMA_BLOCK
+    # (15 KB) — at which point radioHasMemForBle() starts tearing the AP down
+    # again. Stopping at the first failure cannot distinguish a one-off from the
+    # onset of that trend.
+    soak = len(sys.argv) > 3 and sys.argv[3] == "soak"
+
     results = []
     for i in range(1, cycles + 1):
         results.append(await cycle(i, attack_seconds))
-        if not results[-1]:
+        if not results[-1] and not soak:
             print("\nStopping: a cycle failed. Do not iterate blindly on this path.")
             break
     print(f"\n===== RESULT: {sum(results)}/{len(results)} cycles passed =====")
-    return 0 if all(results) and results else 1
+    if soak:
+        print("per-cycle: " + " ".join("P" if r else "F" for r in results))
+    return 0 if results and all(results) else 1
 
 
 if __name__ == "__main__":
