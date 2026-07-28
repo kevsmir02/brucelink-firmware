@@ -567,6 +567,25 @@ int loopOptions(
         if (exit) break;
         if (menuType == MENU_TYPE_MAIN) {
             checkReboot();
+
+            // A CLI command runs on the serial task and draws over the screen —
+            // an attack UI, the Evil Portal — then calls backToMenu() to hand
+            // the display back. Everywhere else that flag is consumed by the
+            // caller's own while(1), but the main menu is the top of the stack,
+            // so there was no caller to unwind into and the request was simply
+            // dropped. redraw is only set by input, so the last frame the
+            // command drew stayed on screen until the user happened to press a
+            // key. That read as a freeze — the Evil Portal appearing to hang on
+            // "Shutting down..." — while the firmware was in fact running
+            // normally and still answering commands.
+            // fillScreen is required: the main menu renders via
+            // drawMainBorder(false), which does not clear, so without it the
+            // previous screen's text survives underneath.
+            if (returnToMenu) {
+                returnToMenu = false;
+                tft.fillScreen(bruceConfig.bgColor);
+                redraw = true;
+            }
             if (devModeCounter >= 5 && !bruceConfig.devMode) {
                 bruceConfig.setDevMode(true);
                 displayInfo("Dev Mode Enabled", true);
