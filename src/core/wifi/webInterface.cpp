@@ -97,15 +97,15 @@ void loopOptionsWebUi() {
         bool opt = WiFi.getMode() - 1;
         options = {
             {"Stop WebUI", stopWebUi},
-            {"WebUi screen", lambdaHelper(startWebUi, opt)}
+            {"WebUi screen", lambdaHelper(startWebUi, opt, false)}
         };
         addOptionToMainMenu();
         loopOptions(options);
         return;
     }
     options = {
-        {"my Network", lambdaHelper(startWebUi, false)},
-        {"AP mode",    lambdaHelper(startWebUi, true) },
+        {"my Network", lambdaHelper(startWebUi, false, false)},
+        {"AP mode",    lambdaHelper(startWebUi, true, false)},
     };
 
     loopOptions(options);
@@ -738,7 +738,7 @@ void configureWebServer() {
 **  Function: startWebUi
 **  Start the WebUI
 **********************************************************************/
-void startWebUi(bool mode_ap) {
+void startWebUi(bool mode_ap, bool background) {
     bool keepWifiConnected = false;
     if (WiFi.status() != WL_CONNECTED) {
         if (mode_ap) wifiConnectMenu(WIFI_AP);
@@ -768,6 +768,7 @@ void startWebUi(bool mode_ap) {
     tft.setLogging();
     drawWebUiScreen(mode_ap);
 #ifdef HAS_SCREEN // Headless always run in the background!
+    if (background) return;
     while (!check(EscPress)) {
         // nothing here, just to hold the screen until the server is on.
         vTaskDelay(pdMS_TO_TICKS(70));

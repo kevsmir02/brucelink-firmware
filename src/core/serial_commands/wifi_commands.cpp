@@ -55,12 +55,25 @@ uint32_t wifiCallback(cmd *c) {
 uint32_t webuiCallback(cmd *c) {
     Command cmd(c);
 
+    // `webui off` frees the WebUI and its AP without touching BLE, so a client
+    // that has moved control onto BLE can hand the WiFi memory back. Running
+    // both transports at once does not fit on this board: loaded with BLE + AP
+    // + WebUI there is ~15 KB free, and a single associated station drives that
+    // to a few hundred bytes, at which point notifies truncate and HTTP dies.
+    // Reuses the teardown WiFi attacks already use.
+    if (cmd.getArgument("off").isSet()) {
+        cleanlyStopWebUiForWiFiFeature();
+        serialDevice->println("WebUI stopped");
+        return true;
+    }
+
     Argument arg = cmd.getArgument("noAp");
     bool noAp = arg.isSet();
+    bool background = cmd.getArgument("bg").isSet();
 
     serialDevice->println(String("Starting Web UI ") + !noAp ? "AP" : "STA");
     serialDevice->println("Press ESC to quit");
-    startWebUi(!noAp); // MEMO: will quit when check(EscPress)
+    startWebUi(!noAp, background); // without bg: quits when check(EscPress)
 
     return true;
 }
@@ -110,6 +123,8 @@ uint32_t responderCallback(cmd *c) {
 void createWifiCommands(SimpleCLI *cli) {
     Command webuiCmd = cli->addCommand("webui", webuiCallback);
     webuiCmd.addFlagArg("noAp");
+    webuiCmd.addFlagArg("off");
+    webuiCmd.addFlagArg("bg");
 
     Command wifiCmd = cli->addCommand("wifi", wifiCallback);
     wifiCmd.addPosArg("status");
