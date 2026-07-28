@@ -1,5 +1,6 @@
 #include "settings.h"
 #include "core/led_control.h"
+#include "core/ram_profile.h"
 #include "core/wifi/wifi_common.h"
 #include "current_year.h"
 #include "display.h"
@@ -1673,11 +1674,13 @@ void enableBLEAPI() {
     if (!ble_api_enabled) {
         // displayWarning("BLE API require huge amount of RAM.");
         // displayWarning("Some features may stop working.");
-        Serial.println(ESP.getFreeHeap());
+        RAM_LOG("ble-api pre-setup");
         bleApi.setup();
-        Serial.println(ESP.getFreeHeap());
+        RAM_LOG("ble-api post-setup");
     } else {
+        RAM_LOG("ble-api pre-end");
         bleApi.end();
+        RAM_LOG("ble-api post-end");
     }
 
     ble_api_enabled = !ble_api_enabled;

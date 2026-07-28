@@ -727,8 +727,10 @@ void configureWebServer() {
         }
     });
 
+    RAM_LOG("webui pre-ws");
     beginWsServer(server);
     server->begin();
+    RAM_LOG("webui post-begin");
     Serial.println("Webserver started");
 }
 
@@ -752,12 +754,14 @@ void startWebUi(bool mode_ap) {
         options.clear();
 
         Serial.println("Configuring Webserver ...");
+        RAM_LOG("webui pre-alloc");
         if (psramFound()) server = (AsyncWebServer *)ps_malloc(sizeof(AsyncWebServer));
         else server = (AsyncWebServer *)malloc(sizeof(AsyncWebServer));
 
         new (server) AsyncWebServer(default_webserverporthttp);
 
         configureWebServer();
+        RAM_LOG("webui post-configure");
 
         isWebUIActive = true;
     }
