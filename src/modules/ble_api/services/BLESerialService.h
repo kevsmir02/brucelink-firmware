@@ -30,6 +30,9 @@ class BLESerialService : public BruceBLEService, public SerialDevice {
     // CCCD callback. Written on the NimBLE host task, read from the loop task;
     // a stale read only costs one wasted notify, so no lock is warranted.
     volatile bool event_subscribed = false;
+    // Set when a chunk's notify exhausted its retries, so endOfResponse() can
+    // tell the client the reply is incomplete.
+    volatile bool truncated = false;
     ByteRing<BLE_RX_RING_SIZE> rx;
     // Guards rx: pushRx() runs on the NimBLE host task, available()/read()/
     // readStringUntil() are polled from the Arduino loop task.

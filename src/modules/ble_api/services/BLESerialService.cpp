@@ -156,6 +156,12 @@ void BLESerialService::notifyChunkedTo(NimBLECharacteristic *chr, const uint8_t 
                 (unsigned)off,
                 (unsigned)len
             );
+            // Serial goes to the native USB-CDC port on this board, which is
+            // normally not plugged in — so that printf reaches nobody. Record it
+            // instead, and let endOfResponse() tell the client in-band. Without
+            // this a memory-starved device returns silently truncated JSON and
+            // the app sees a parse error rather than "the device ran out of RAM".
+            truncated = true;
             return;
         }
     }
@@ -166,6 +172,14 @@ void BLESerialService::notifyChunked(const uint8_t *data, size_t len) {
 }
 
 void BLESerialService::endOfResponse() {
+    // Marker first, so a client that only reads up to EOT still sees it. By the
+    // time a response ends the notify queue has usually drained, so this short
+    // write generally succeeds even though the bulk payload did not.
+    if (truncated) {
+        truncated = false;
+        static const char warn[] = "\r\n[TRUNCATED: device low on memory]\r\n";
+        notifyChunkedTo(serial_char, reinterpret_cast<const uint8_t *>(warn), sizeof(warn) - 1);
+    }
     const uint8_t eot = BLE_RESPONSE_EOT;
     notifyChunkedTo(serial_char, &eot, 1);
 }
