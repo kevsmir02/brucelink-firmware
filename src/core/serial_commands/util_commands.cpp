@@ -7,6 +7,7 @@
 #include "core/wifi/wifi_common.h" //to return MAC addr
 #include "core/bus_HAL.h"
 #include "modules/badusb_ble/ducky_typer.h"
+#include <esp_heap_caps.h>
 #include <globals.h>
 
 uint32_t uptimeCallback(cmd *c) {
@@ -89,18 +90,41 @@ uint32_t i2cCallback(cmd *c) {
     return true;
 }
 
+// Emitted as one machine-readable line so a bench script can poll `free` over
+// BLE and plot the series. RAM_LOG() prints the same numbers but writes to
+// `Serial`, which on USB-CDC boards is the native USB port — not the UART
+// bridge a laptop is usually attached to — so on those boards its output goes
+// nowhere. This path rides serialDevice, so it reaches whichever transport the
+// CLI is currently answering on.
+//
+// Free heap alone does not explain a radio failure: what gates esp_wifi_init /
+// esp_bt_controller_init is the LARGEST CONTIGUOUS DMA-capable block (see
+// core/radio_mem.h), and that can be far below total free when the heap is
+// fragmented. minEver is the low-water mark across the whole uptime, which
+// distinguishes "we are near the edge now" from "we already touched the floor".
 uint32_t freeCallback(cmd *c) {
-    serialDevice->print("Total heap: ");
-    serialDevice->println(ESP.getHeapSize());
-    serialDevice->print("Free heap: ");
-    serialDevice->println(ESP.getFreeHeap());
+    multi_heap_info_t internalInfo;
+    heap_caps_get_info(&internalInfo, MALLOC_CAP_INTERNAL);
 
-    if (psramFound()) {
-        serialDevice->print("Total PSRAM: ");
-        serialDevice->println(ESP.getPsramSize());
-        serialDevice->print("Free PSRAM: ");
-        serialDevice->println(ESP.getFreePsram());
-    }
+    char line[320];
+    snprintf(
+        line,
+        sizeof(line),
+        "HEAP t=%lums total=%u free=%u minEver=%u | internal free=%u largest=%u blocks=%u | "
+        "dma largest=%u | psram found=%d total=%u free=%u",
+        (unsigned long)millis(),
+        (unsigned)ESP.getHeapSize(),
+        (unsigned)ESP.getFreeHeap(),
+        (unsigned)ESP.getMinFreeHeap(),
+        (unsigned)internalInfo.total_free_bytes,
+        (unsigned)internalInfo.largest_free_block,
+        (unsigned)internalInfo.free_blocks,
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA),
+        (int)psramFound(),
+        (unsigned)ESP.getPsramSize(),
+        (unsigned)ESP.getFreePsram()
+    );
+    serialDevice->println(line);
 
     return true;
 }
