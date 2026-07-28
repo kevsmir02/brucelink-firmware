@@ -86,6 +86,10 @@ public:
     String wigleBasicToken = "";
     String wdgwarsApiKey = "your 64-char hex key from wdgwars.pl/profile";
     int devMode = 0;
+    // Remembers whether the BLE API was left on, so it can be armed at boot.
+    // Without it every reboot needs a walk to the device: the app's only way in
+    // was over WiFi, purely to send `ble api on`.
+    int bleApiAutoStart = 0;
     int colorInverted = 1;
     int badUSBBLEKeyboardLayout = 0;
     uint16_t badUSBBLEKeyDelay = 10;
@@ -189,6 +193,7 @@ public:
     void setWigleBasicToken(String value);
     void setWdgwarsApiKey(String value);
     void setDevMode(int value);
+    void setBleApiAutoStart(int value);
     void validateDevModeValue();
     void setColorInverted(int value);
     void validateColorInverted();

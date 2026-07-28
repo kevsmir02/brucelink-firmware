@@ -578,6 +578,16 @@ void setup() {
         bruceConfig.setStartupApp("");
     }
 
+#if !defined(LITE_VERSION)
+    // Arm the control link before the menu comes up, so the companion app can
+    // connect over BLE alone. Previously the app could only reach a fresh boot
+    // over WiFi, purely to turn this on. Auto-start was tried and reverted once
+    // (eb05177b / e2631370) for two reasons that no longer hold: BLE and WiFi
+    // fighting over DMA, now avoided by never running both; and blespam's
+    // pause/resume crashing on re-init, fixed by the suspend/resume path.
+    if (bruceConfig.bleApiAutoStart) enableBLEAPI();
+#endif
+
     RAM_LOG("setup-end");
     RAM_LOG_SAMPLER(5000);
 }

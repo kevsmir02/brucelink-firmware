@@ -66,6 +66,7 @@ JsonDocument BruceConfig::toJson() const {
     setting["wigleBasicToken"] = wigleBasicToken;
     setting["wdgwarsApiKey"] = wdgwarsApiKey;
     setting["devMode"] = devMode;
+    setting["bleApiAutoStart"] = bleApiAutoStart;
     setting["colorInverted"] = colorInverted;
 
     setting["badUSBBLEKeyboardLayout"] = badUSBBLEKeyboardLayout;
@@ -373,6 +374,7 @@ void BruceConfig::fromFile(bool checkFS) {
         count++;
         log_e("Fail");
     }
+    if (!setting["bleApiAutoStart"].isNull()) { bleApiAutoStart = setting["bleApiAutoStart"].as<int>(); }
     if (!setting["devMode"].isNull()) {
         devMode = setting["devMode"].as<int>();
     } else {
@@ -759,6 +761,11 @@ void BruceConfig::setWigleBasicToken(String value) {
 
 void BruceConfig::setWdgwarsApiKey(String value) {
     wdgwarsApiKey = value;
+    saveFile();
+}
+
+void BruceConfig::setBleApiAutoStart(int value) {
+    bleApiAutoStart = value ? 1 : 0;
     saveFile();
 }
 

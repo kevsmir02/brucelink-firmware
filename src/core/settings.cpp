@@ -1684,6 +1684,11 @@ void enableBLEAPI() {
     }
 
     ble_api_enabled = !ble_api_enabled;
+    // Remember the user's intent so the next boot can arm it without needing a
+    // WiFi session just to send `ble api on`. Deliberately NOT touched by
+    // bleApiSuspend/Resume, which drive bleApi.end()/setup() directly — a swap
+    // around an attack is not the user changing their mind.
+    bruceConfig.setBleApiAutoStart(ble_api_enabled ? 1 : 0);
 }
 
 bool bleApiIsEnabled() { return ble_api_enabled; }
