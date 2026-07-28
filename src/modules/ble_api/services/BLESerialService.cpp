@@ -1,5 +1,6 @@
 #if !defined(LITE_VERSION)
 #include "BLESerialService.h"
+#include "core/ram_profile.h"
 #include "modules/ble/ble_common.h" // bleNotifyRetry
 #include <NimBLEDevice.h>
 
@@ -63,6 +64,7 @@ void BLESerialService::pushRx(const uint8_t *data, size_t len) {
 
 void BLESerialService::setup(NimBLEServer *pServer) {
     pService = pServer->createService("4371ec0b-3d43-49f9-b731-7c72a4a7bb91");
+    RAM_LOGF("[BLE_API] serial svc: pService=%p", (void *)pService);
 
     serial_char = pService->createCharacteristic(
         "d555ed97-bf2a-4f46-b3eb-d1fcdd7325e9", // Battery Level

@@ -3431,7 +3431,21 @@ void FastPairExploitEngine::spamFastPairPopups(FastPairPopupType popupType, int 
         showAttackResult(false, "BLE init failed (free WiFi/SD first)");
         return;
     }
-    AutoCleanup cleanup([]() { BLEStateManager::deinitBLE(true); });
+    // Restoring the address type matters as much as tearing the stack down.
+    // fastPairRotateAddress() flips NimBLEDevice::m_ownAddrType to
+    // BLE_OWN_ADDR_RANDOM for MAC rotation, and that is a STATIC member which
+    // survives deinit()/init(). Left set, the next module to advertise asks the
+    // controller to use a random address that no longer exists after the
+    // re-init, and ble_gap_adv_start() fails with rc=530 (HCI 0x12, invalid
+    // parameters) — silently, because only NimBLE's own error log reports it.
+    // That is exactly what stopped the BLE control link coming back after a
+    // FastPair run. ble_spam.cpp:1441 already does this for the other engine.
+    AutoCleanup cleanup([]() {
+        BLEStateManager::deinitBLE(true);
+#ifdef CONFIG_BT_NIMBLE_ENABLED
+        NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_PUBLIC);
+#endif
+    });
 
     NimBLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
     if (!pAdvertising) {
