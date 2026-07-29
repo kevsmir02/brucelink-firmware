@@ -337,10 +337,12 @@ Two engines behind one verb (`attack_commands.cpp:74`):
   It previously built the payload as raw AD structures and handed them to
   `setManufacturerData()`, which wrapped them again, so the advert went out under
   company ID 0x0303 and no scanner saw it — 60 adverts, zero popups on 2026-07-29.
-  Now packet-captured at 8–13 valid `0xFE2C` adverts per run. **Handset popups have
-  not been re-tested since the fix**; the test Android's Fast Pair notifications are
-  off, which is what made the original diagnosis ambiguous. Radio level verified,
-  handset level UNVERIFIED. See [KNOWN_ISSUES.md](./KNOWN_ISSUES.md) §ISSUE-8.
+  Now packet-captured at 8–16 valid `0xFE2C` adverts per run, and **confirmed at
+  handset level 2026-07-29** — an Android showed the Fast Pair popup during
+  `blespam fastpair_regular 900`. The earlier Android null result was the handset's
+  "Scan for nearby devices" being off, not a firmware fault. **iPhones do not
+  implement Fast Pair** (`0xFE2C` is a Google protocol) — use `apple` for iOS. See
+  [KNOWN_ISSUES.md](./KNOWN_ISSUES.md) §ISSUE-8.
 - **Generic spam engine** (`bleSpamAttackTypeFromName`, `ble_spam.cpp:1592`):
   `apple`, `android`, `ibeacon`, `samsung`, `windows` (alias `swiftpair`),
   `random` (alias `all`). All types were packet-captured on 2026-07-29 and

@@ -834,7 +834,7 @@ Recorded so the gap is visible rather than implied. Session of 2026-07-29, unatt
 | `/getscreen`, `/listfiles`, `/file`, `/upload`, `/edit`, `/rename`, WS `/ws` | Same blocker. `GET /` (200) and `GET /systeminfo` (401 unauth) are the only routes exercised. |
 | `badusb run_from_file` / `run_from_buffer`, BLE HID variant | **Deliberately skipped.** It emits real USB HID keystrokes into the attached host — here, the laptop running the test session, whose focused window is a terminal. Unsafe unattended; needs an attended session with a scratch window focused. Note `print`/`println` in JS are the *badusb* natives (`mqjs_stdlib.h`), so JS payloads carry the same hazard. |
 | `wifi add` / `wifi on` / `wifi off` | The user chose the AP path for this session, which does not exercise them. Zero evidence either way. |
-| FastPair **handset** popup after `c9c43c03` | Radio level is proven (8-13 valid `0xFE2C` adverts per run); handset level remains UNVERIFIED. Needs the user's iPhone, and "Nearby device scanning" enabled on the Android first so a negative result means something. |
+| ~~FastPair **handset** popup after `c9c43c03`~~ | **DONE 2026-07-29** — Android popup confirmed by the user, with 16 valid `0xFE2C` adverts captured concurrently. See §Resolved ISSUE-8. |
 | Evil Portal capturing a real credential, and under load | Needs a phone associating and typing. Still only ever run idle (ISSUE-1 predicts load is the real crash risk). |
 | `poweroff`, `sleep` | Would take the device down with nobody present to power-cycle it. `reboot` was tested instead and passed 2/2. |
 | `blespam random`/`all`, interactive `blespam menu` | Menu-driven; needs on-device dismissal. |
@@ -949,6 +949,22 @@ samples: sd={'fe2c': '000047'} / '00000a' / '0000f0' / '000048' / '000006'
 Before the fix the same command produced **0** adverts carrying 0xFE2C service data
 and 7 carrying company ID 0x0303. The 3-byte service-data payloads are model IDs and
 they vary across the model list, as intended.
+
+**Handset confirmation, 2026-07-29 — the fix is now proven end-to-end.** The user
+watched an Android handset during `blespam fastpair_regular 900` and reported the Fast
+Pair popup appearing. The simultaneous packet capture recorded **16 distinct addresses
+carrying 0xFE2C service data in 45 s**, cycling five model IDs (`000047`, `000048`,
+`00000a`, `0000f0`, `000006`), each on a fresh random MAC, with company ID `0x0303`
+absent entirely.
+
+This retires the caveat this entry carried since the fix landed, that only the radio
+level was proven. Note the earlier Android null result was **not** a firmware fault —
+it was "Scan for nearby devices" being off on the handset, which is what made the
+original diagnosis ambiguous.
+
+**iPhones do not implement Fast Pair.** `0xFE2C` is a Google protocol; an iPhone
+showing nothing for `fastpair_*` is correct behaviour, not a defect. The iOS popup
+comes from `blespam apple` (Continuity NearbyAction), a different payload.
 
 ---
 
