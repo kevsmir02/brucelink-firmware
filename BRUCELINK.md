@@ -45,6 +45,12 @@ Consequences that shape most of the code:
 
 - Free heap does not predict this. Use the `free` verb, which reports the largest
   contiguous DMA block explicitly.
+- **"WiFi as bulk transfer" is aspirational, not current behaviour.** Measured
+  2026-07-29: with the BLE API armed, `webui` cannot start at all — AsyncTCP fails to
+  allocate its task with 1,235 bytes free, the HTTP server never listens, and the AP
+  beacons but cannot accept a station. BLE replies truncate to 1 byte in the same
+  state. The two transports are not merely tight together, they are mutually
+  exclusive today. See `docs/KNOWN_ISSUES.md` §ISSUE-12.
 - Never let both radios be loaded at once. `blespam` suspends the BLE API *before*
   touching NimBLE, which frees ~62 KB and takes the DMA block from ~1.3 KB to ~32 KB.
 - Ordering is everything. Tearing BLE down cleanly *before* an attack means the
@@ -192,8 +198,16 @@ else. Therefore:
   console; it is this, and it is not a new fault.
 - No SD card: `SD` totals read `0 B`. Files live on LittleFS (~11.4 MB).
 
-Ground truth comes from `i2c` (bus scan), `rf selftest` (probes CC1101 over SPI) and
-the `free` verb — not from `capabilities`.
+Ground truth comes from `i2c` (bus scan) and the `free` verb — not from
+`capabilities`.
+
+**`rf selftest` does not exist in this build.** This file previously recommended it as
+ground truth for CC1101; the device answers `ERROR: Command not found at 'rf selftest'`
+(verified 2026-07-29). Its registration sits inside `#if RF_DEBUG`
+(`rf_commands.cpp:390-398`, called at `:449-453`), and `RF_DEBUG` defaults to 0
+(`src/modules/rf/protocols/rf_config.h:19-21`) and is not overridden for
+`smoochiee-board`. The same guard hides `keeloqtest` and `keeloqfiletest`. Rebuild
+with `-DRF_DEBUG=1` if you want them.
 
 ## Testing
 

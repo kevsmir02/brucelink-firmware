@@ -6,11 +6,22 @@ earlier design note disagrees with what is written here, the code wins. See
 and [KNOWN_ISSUES.md](./KNOWN_ISSUES.md) for verified defects — read that before
 planning against any verb; this document covers *what the interface is*.
 
-**Contract version:** 2.2 — audited against `0b2073fa`, re-verified on hardware
-2026-07-29 against `c9c43c03`, which fixed the `fastpair_*` no-op and the lost
-name/UUID/BT-MAC after a spam (§5.1). Fork point from upstream Bruce: `59e83bfb`
+**Contract version:** 2.3 — audited against `0b2073fa`, re-verified on hardware
+2026-07-29 against `c9c43c03` (which fixed the `fastpair_*` no-op and the lost
+name/UUID/BT-MAC after a spam, §5.1), then extended by a verb-surface and HTTP sweep
+the same day. New in 2.3: the AP gateway is `172.0.0.1` not `192.168.4.1` (§4); HTTP
+auth verified and `POST /login` found to abort the device under load (ISSUE-18); the
+JS interpreter has no return channel (ISSUE-15) and retains ~18 KB (ISSUE-17);
+`encrypt`/`decrypt` round-trips fail ~62% silently (ISSUE-13); `settings` writes are
+silent no-ops for most fields (ISSUE-14). Fork point from upstream Bruce: `59e83bfb`
 (2026-07-23); companion work starts at `373fb5d8` (2026-07-25). Bump this line
 whenever the contract changes.
+
+> **Read `docs/KNOWN_ISSUES.md` §ISSUE-12 before planning around HTTP.** The WebUI
+> works from a fresh boot but starts with roughly 18 KB of margin, and silently fails
+> to start at all if anything consumed heap first. BLE control and HTTP do coexist —
+> `systeminfo` answered over BLE with the AP up and `free_heap:14140` — but the
+> combination has no headroom.
 
 **Line numbers drift.** Every citation below was re-checked at `0b2073fa` and points
 at real code, but a citation is a pointer, not a guarantee — grep for the symbol if
@@ -156,7 +167,11 @@ Field notes — these bit us, read them:
   (`system_info.cpp:78`): `0`=OFF, `1`=STA, `2`=AP, `3`=APSTA. It is **not** the
   string `"STA"`.
 - **`ip` is `WiFi.localIP()`** (`system_info.cpp:79`), which reads `0.0.0.0` in AP
-  mode. For the AP address use the known `192.168.4.1`.
+  mode. **The WebUI AP gateway is `172.0.0.1`, not `192.168.4.1`** — measured
+  2026-07-29: a laptop joining `BruceNet` got `172.0.0.3/24`, default via `172.0.0.1`,
+  and `GET http://172.0.0.1/` returned 200. `192.168.4.1` is the *Evil Portal*
+  gateway override (§5.2), a different code path; this document previously conflated
+  the two.
 - `has_pn532`, `has_fm`, `has_eth` are **hardcoded `false`**
   (`system_info.cpp:47,58,59`) regardless of the hardware. Do not trust them.
 - **No capability flag is a runtime probe. Do not gate app UI on `capabilities`.**

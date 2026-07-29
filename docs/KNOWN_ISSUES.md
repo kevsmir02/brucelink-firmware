@@ -362,6 +362,332 @@ event is captured rather than inferred.
 
 ---
 
+### ISSUE-12 — `webui` starts with almost no margin, and fails silently if anything consumed heap first
+
+**Status:** OPEN · **Severity:** high · **Verified** 2026-07-29 · **Both outcomes
+reproduced, with console captures**
+
+From a **fresh boot** the WebUI works: the AP accepts a station, DHCP hands out a
+lease, and HTTP serves. From a boot where something has already taken ~18 KB, the same
+command fails completely — and reports success either way. The margin is the finding.
+
+**Working case** — fresh boot, free heap 81,339 / largest 31,732 before `webui -bg`:
+
+```
+[RAMLOG] stage=webui pre-alloc      heap free= 28988 largest= 20468 dma= 20468
+[RAMLOG] stage=before MDNS          heap free= 28728 largest= 20468 dma= 20468
+[RAMLOG] stage=after MDNS           heap free= 23068 largest= 14836 dma= 14836
+[RAMLOG] stage=webui pre-ws         heap free= 20608 largest= 12788 dma= 12788
+[RAMLOG] stage=webui post-begin     heap free= 15392 largest=  7156 dma=  7156
+```
+
+No AsyncTCP error. `systeminfo` answered over BLE **with the AP up** — a full 472-byte
+reply, `wifi_mode:2`, `free_heap:14140`. The laptop associated and got `172.0.0.3/24`.
+
+**Failing case** — same command, same firmware, after a JS interpreter run had left
+free heap at 62,763 instead of 81,391:
+
+```
+[RAMLOG] stage=webui pre-alloc      heap free=  9903 minEver= 119 largest= 6132 dma= 1844
+[RAMLOG] stage=after MDNS           heap free=  3703             largest= 1652 dma=  628
+[RAMLOG] stage=webui pre-ws         heap free=  1235 minEver= 103 largest= 1012 dma=   28
+[E][AsyncTCP.cpp:1521] begin(): failed to start task
+[RAMLOG] stage=webui post-configure heap free=   943             largest=  756 dma=   28
+```
+
+The HTTP server never listens. The AP still beacons — visible in every scan at signal
+90-100 — but cannot complete an association, which NetworkManager reports misleadingly:
+
+```
+supplicant interface state: inactive -> authenticating
+supplicant interface state: authenticating -> disconnected
+Error: Connection activation failed: The Wi-Fi network could not be found
+```
+
+It does find the AP; it gets to authentication and the device cannot allocate for the
+station. Tested with MAC randomisation on and off and with the profile pinned to BSSID
+`1E:DB:D4:5E:D7:38` — no effect, consistent with a device-side cause.
+
+**`webui -bg` returns success in both cases**, printing `AP` / `Press ESC to quit`
+whether or not a server started. Same family as ISSUE-7. The only in-band signal that
+it failed is that nothing subsequently answers on port 80.
+
+**In the failing state the BLE control link dies too**: CLI replies truncate to 1 byte
+— command accepted, EOT arrives, payload gone. `webui -off` restores full replies
+immediately, which is what establishes causation. Observed `minEver=119`.
+
+**~18 KB is the whole margin.** mDNS alone costs 5.6-5.9 KB and roughly halves the
+largest block in both runs. Anything that permanently retains heap before `webui`
+starts — see ISSUE-17 — can push it over.
+
+**Correction to this entry's own history:** it originally claimed `webui` cannot start
+at all while the BLE API is armed, generalising from the failing run. That was wrong,
+and it was caught by a conflicting prior measurement already recorded in §Verified
+working ("Simultaneous BLE + AP + WebUI … free heap 14,951"), which the fresh-boot
+retest then confirmed at 14,140. Recorded rather than deleted because the failing case
+is real and the trap — testing from a dirty baseline — is easy to repeat.
+
+---
+
+### ISSUE-13 — `encrypt` then `decrypt` fails ~62% of the time, silently
+
+**Status:** OPEN · **Severity:** high (silent data loss to the user's eye) ·
+**Verified** 2026-07-29 · **Root cause proven, falsifiable test 8/8**
+
+A file written by `encrypt` often cannot be read back by `decrypt` on the same device
+with the same password. The failure is silent: an empty reply, identical to the reply
+for a wrong password.
+
+**Root cause — a writer/reader format mismatch.** The writer does not zero-pad hex:
+
+```cpp
+// src/core/passwords.cpp:162
+for (size_t i = 0; i < dataStr.length(); i++) dataStrHex += String(dataStr[i], HEX) + " ";
+```
+
+`String(v, HEX)` emits one character for values below 0x10, so byte `0x08` is written
+`8`. The reader assumes a fixed 3-character stride:
+
+```cpp
+// src/core/passwords.cpp:113-116
+for (int i = 0; i < cypertextData.length(); i += 3) {
+    uint8_t highNibble = hexCharToDecimal(cypertextData[i]);
+    uint8_t lowNibble  = hexCharToDecimal(cypertextData[i + 1]);
+```
+
+One short token desynchronises every byte after it. Visible in a real file — note
+`7B 8 4B`:
+
+```
+Data: 5E D6 13 B0 B4 BE 80 31 F8 93 6D 7C FA 72 7B 8 4B DD 69
+```
+
+**Proving test.** Prediction: decrypt succeeds iff every token on the `Data:` line is
+2 characters. Eight payloads encrypted and read back, 2026-07-29:
+
+| payload | short token | predicted | actual |
+|---|---|---|---|
+| alpha | — | ok | **ok** |
+| bravo | `2` | fail | **fail** |
+| charlie | `2` | fail | **fail** |
+| delta | `F` | fail | **fail** |
+| echo | `B` | fail | **fail** |
+| foxtrot | — | ok | **ok** |
+| golf | `F` | fail | **fail** |
+| hotel | — | ok | **ok** |
+
+**8/8 agreement**, 5 of 8 failing. Expected failure rate for an N-byte ciphertext is
+`1 - (240/256)^N` — about 70% at N=19.
+
+**No data is lost on disk**; the bytes are all present and a tokenising reader would
+recover existing files. Fix either end: zero-pad in `encryptString`, or split on
+whitespace in `readDecryptedFile`. Padding the writer alone would leave existing
+files unreadable, so the reader should be fixed regardless.
+
+**Worth stating plainly to users:** the algorithm is XOR with an MD5-derived key, 10
+passes (`Algo: XOR`, `KeyDerivationAlgo: MD5` in the file header). It is obfuscation,
+not encryption, and the app should not present it as the latter.
+
+---
+
+### ISSUE-14 — `settings <field> <value>` silently does nothing for most fields
+
+**Status:** OPEN · **Severity:** high (writes report success and change nothing) ·
+**Verified** 2026-07-29 · **Tested against a control**
+
+`settingsCallback` validates the field name against `bruceConfig.toJson()`, but only
+**14** fields are actually wired to a setter: `priColor`, `rot`, `dimmerSet`,
+`bright`, `tmz`, `soundEnabled`, `wifiAtStartup`, `webUI`, `wifiAp`, `wifi`,
+`wigleBasicToken`, `wdgwarsApiKey`, `devMode`, `disabledMenus`
+(`settings_commands.cpp`). Every other serialised field passes validation, matches no
+branch, and reaches the closing `return true`.
+
+**Tested on device**, with a whitelisted field as the control:
+
+```
+$ settings bleApiAutoStart        ->  bleApiAutoStart = 1
+$ settings bleApiAutoStart 0      ->  (empty reply)
+$ settings bleApiAutoStart        ->  bleApiAutoStart = 1     <- unchanged
+$ settings bright                 ->  bright = 100
+$ settings bright 60              ->  (empty reply)
+$ settings bright                 ->  bright = 60             <- changed
+$ settings nosuchfield 1          ->  Invalid field name: nosuchfield
+```
+
+A successful write and a silently discarded one return the **same empty reply**. Only
+a name that is absent from the JSON produces an error. The app cannot tell a write
+that took effect from one that did not.
+
+`bleApiAutoStart` being unwritable is what makes ISSUE-12 untestable from the CLI.
+
+---
+
+### ISSUE-15 — the JS interpreter runs scripts but has no return channel
+
+**Status:** OPEN · **Severity:** high (no output, no errors, no result) ·
+**Verified** 2026-07-29
+
+`js run_from_buffer` executes correctly — proven by side effect, not by output:
+
+```
+$ js run_from_buffer 200
+  storage.write("/js_ran.txt", "JS_EXECUTED");
+$ cat /js_ran.txt   ->  JS_EXECUTED
+```
+
+But nothing a script prints, and no error it raises, ever reaches the caller. The two
+print bindings both bypass `serialDevice`:
+
+- `log()` → `js_print` (`globals_js.cpp:266-285`) writes to C `stdout` via
+  `fwrite`/`putchar`. Not `Serial`, not `serialDevice`; observed on neither channel.
+- `serial.print()` / `serial.println()` → `internal_print_mq`
+  (`serial_js.cpp:8-40`) writes to `Serial` and optionally `tft` — the USB console at
+  best, never the BLE client.
+
+**Errors are equally invisible, and indistinguishable from success.** Three runs, all
+returning a byte-identical 52-byte reply (`Reading input data from serial buffer
+until EOF` + prompt):
+
+| script | outcome | BLE reply |
+|---|---|---|
+| `storage.write(...)` | ran, file created | 52 bytes |
+| `this is not valid javascript @@@` | syntax error | 52 bytes |
+| `nosuchfunction(1);` | reference error | 52 bytes |
+
+A `ReferenceError` for bare `print` was seen once on the USB console, so errors do
+reach `Serial` in some paths — but never the app.
+
+**Consequence:** the app can ship payloads but cannot read a result or detect a
+failure. The only working return path is a side effect the app then polls for, e.g.
+write a file and `cat` it.
+
+**Naming trap:** bare `print`/`println` are **badusb HID** natives
+(`native_badusbPrint`, `mqjs_stdlib.h`), not console output. A script calling
+`print("x")` types keystrokes into whatever host the device is plugged into.
+
+---
+
+### ISSUE-16 — BLE replies truncate silently under heap fragmentation, with no marker
+
+**Status:** OPEN · **Severity:** medium · **Verified** 2026-07-29 · **Non-deterministic**
+
+After a `webui` start/stop cycle the largest free block does not return to baseline —
+31,732 bytes at boot versus 11,252 after — and BLE replies begin to lose data with no
+indication. The documented `[TRUNCATED: device low on memory]` marker never appeared.
+
+Three identical `ls /` calls in succession returned **297, 257 and 297 bytes**; the
+257-byte reply silently dropped a filename and left a bare size on its own line:
+
+```
+PortalTemplates	<DIR>
+1456                       <- name gone, entry mangled
+bruce.conf	1912
+```
+
+`storage stat /bak.bruce.conf` returned a partial reply and **no EOT at all**, timing
+out after 25 s with the `regular file` and `Modify:` lines missing.
+
+**No data was lost on the device** — `bak.bruce.conf` was confirmed present at its
+correct size of 1932 bytes by a direct `storage stat`, and a full `ls /` after reboot
+matched the session-start listing exactly. This is a transport defect, not a
+filesystem one. Worth stating because a truncated `ls` reads exactly like file loss.
+
+**A reboot fully restores it**: free 81,391, largest block 31,732, `ls /` back to a
+complete 297 bytes.
+
+**Consequence for the app:** a short reply is not proof of a short answer, and a
+missing EOT is not proof the device is wedged. The app should treat a missing EOT as
+"retry", and should not render a file listing as authoritative after heavy WiFi use.
+
+---
+
+### ISSUE-17 — the JS interpreter permanently retains ~18 KB of internal heap
+
+**Status:** OPEN · **Severity:** high (it is enough to break `webui`, see ISSUE-12) ·
+**Verified** 2026-07-29 · **Measured across a reboot boundary**
+
+Running any `js run_from_buffer` script leaves internal heap permanently lower until
+the device is rebooted. Measured on the same boot, 2026-07-29:
+
+| Point | free internal | largest block | PSRAM free |
+|---|---|---|---|
+| fresh boot, BLE armed | 81,391 | 31,732 | 8,382,704 |
+| after several `js run_from_buffer` runs | 62,763 | 31,732 | 7,866,164 |
+| after reboot | 81,391 | 31,732 | 8,382,704 |
+
+About **18.6 KB of internal heap and ~516 KB of PSRAM** are not returned. A reboot
+restores both exactly, so this is retention, not fragmentation.
+
+**Not established:** whether this is a true leak (unbounded, growing per run) or a
+one-off interpreter context that is allocated on first use and cached. The measurements
+above cannot distinguish those, because several runs were made between the two
+readings. Distinguishing them needs `free` sampled after each individual run — the
+obvious next experiment, and cheap.
+
+**Why it matters beyond memory accounting:** this is precisely the ~18 KB that makes
+the difference between `webui` starting and failing silently (ISSUE-12). An app that
+runs a JS payload and then tries to move bulk transfer onto HTTP will find the HTTP
+transport gone, with no error from either verb.
+
+---
+
+### ISSUE-18 — `POST /login` writes the whole config to flash, and can abort the device
+
+**Status:** OPEN · **Severity:** critical (it is the first request any client makes) ·
+**Verified** 2026-07-29 · **Crash 1/1 with an ELF-matched backtrace; HTTP failure 2/2**
+
+Each successful login appends a session token and immediately persists the **entire**
+config file to LittleFS. Under the memory pressure the WebUI itself creates, that
+`fopen` cannot allocate and newlib calls `abort()`.
+
+**Decoded backtrace**, innermost last. `ELF file SHA256: b02178b48` matches
+`.pio/build/smoochiee-board/firmware.elf` (`b02178b485345ef7`), so this decode is
+authoritative:
+
+```
+abort() was called at PC 0x40378e97 on core 1
+
+operator()                              webInterface.cpp:435   <- POST /login handler
+BruceConfig::addWebUISession            config.cpp:865
+BruceConfig::saveFile                   config.cpp:445
+fs::FS::open                            FS.cpp:209
+VFSImpl::open                           vfs_api.cpp:78
+VFSFileImpl::VFSFileImpl                vfs_api.cpp:318
+fopen                                   newlib fopen.c:168
+__sfp                                   newlib findfp.c:201
+__retarget_lock_init_recursive          newlib locks.c:303
+lock_init_generic                       newlib locks.c:77      <- abort()
+Rebooting... rst:0xc (RTC_SW_CPU_RST)
+```
+
+**Observed twice, with different outcomes** — both from a fresh boot with a station
+associated:
+
+| Run | Logins before failure | Outcome |
+|---|---|---|
+| 1 | ~4 (mixed with other requests) | **abort + reboot**, backtrace above |
+| 2 | 2 | HTTP stopped answering (`http=000`); **no reboot**, uptime continuous 1:41 → 2:08 |
+
+Memory at the end of run 2: free 12,723, **`minEver=620` bytes**, DMA largest 2,804.
+So both outcomes are the same exhaustion; whether it aborts or merely stops serving is
+not deterministic.
+
+**Consequences.** Logging in is the first thing any HTTP client does, and the token is
+not reusable indefinitely — the app must re-login, and each attempt rewrites the config
+file. This also puts avoidable write cycles on flash for what is a session-lifetime
+value.
+
+**Auth itself is sound** and was verified separately: `POST /login` with
+`admin`/`bruce` returns `302` + `Set-Cookie: BRUCESESSION=…; Path=/; HttpOnly`, a wrong
+password returns `302` to `/?failed` with **no** cookie, and `GET /systeminfo` without
+credentials returns **401 Unauthorized**.
+
+**Fix direction (not implemented):** keep sessions in RAM, or persist them lazily
+rather than on every login; and check the `FS::open` result instead of letting newlib
+abort.
+
+---
+
 ## Cosmetic / upstream
 
 Recorded because they appear on every boot and are easy to mistake for real faults
@@ -396,7 +722,35 @@ on the hardware above, 2026-07-29, over the BLE CLI characteristic unless stated
 | `webui -bg` / `webui -off` | `-bg` returned in 357 ms without holding the screen; `-off` returned `WebUI stopped` and reclaimed memory (DMA largest 6,900 → 19,444). |
 | Simultaneous BLE + AP + WebUI | `systeminfo` answered over BLE with the AP up; free heap 14,951, DMA largest 6,900. |
 | `RADIO_BLE_MIN_DMA_BLOCK` = 15 KB | `radio_mem.h:32`. |
+| HTTP auth (AP mode) | `POST /login admin/bruce` → 302 + `Set-Cookie: BRUCESESSION=…; Path=/; HttpOnly`. Wrong password → 302 to `/?failed`, **no** cookie. `GET /systeminfo` unauthenticated → **401**. 2026-07-29. |
+| AP addressing is **172.0.0.1**, not 192.168.4.1 | Laptop associated and got `172.0.0.3/24`, default via `172.0.0.1`. `GET /` → 200, 601 bytes. Contract §said 192.168.4.1; that is the *Evil Portal* gateway override, not the WebUI AP. |
+| `reboot` verb | Link drops mid-write, device returns in ~12 s with the BLE API re-armed; console shows `rst:0xc (RTC_SW_CPU_RST)`. 2/2. |
+| Full file CRUD over BLE | `mkdir`, `storage write` (+EOF/5 s line mode), `cat`, `md5`, `crc32`, `storage stat`, `storage copy`, `storage rename`, `rm`, `rmdir` — all exercised and the filesystem left byte-identical to session start. MD5 of a copy matched the source. |
+| `gpio` read/mode/set | On `smoochiee-board`, `is_free_gpio_pin` allows **only 47/48** (`gpio_commands.cpp:4-26`). `gpio mode 47 3` (OUTPUT, `0x03`) then `set 1` → reads 1, `set 0` → reads 0. Invalid pin and invalid value both rejected cleanly. **Success returns an empty reply.** |
+| Missing-module verbs fail cleanly | `nrf24`, `gps`, `getscreen` → `ERROR: Command not found` (no `nrf_commands.cpp`/`gps_commands.cpp` exist). `rfid info` → "No tag data…", `rfid reset` → "No active RFID module." `ir rx` bounded at ~9.1 s. |
+| `js` executes correctly | Proven by side effect: `storage.write("/js_ran.txt","JS_EXECUTED")` then `cat` returned the content. Output/errors are a separate defect (ISSUE-15). |
+| Heap fully recovers on reboot | After WebUI + JS runs left free at 44,255 / largest 11,252, a reboot restored 81,391 / 31,732 exactly, and `ls /` returned to a complete 297 bytes. |
 | Menu exit paths | `loopOptions` breaks on `check(EscPress)` for non-main menus (`display.cpp:647`); `addOptionToMainMenu()` also pushes a `Main Menu` option calling `backToMenu()` (`utils.cpp:27-30`). Either works. |
+
+---
+
+## Not tested, and why
+
+Recorded so the gap is visible rather than implied. Session of 2026-07-29, unattended.
+
+| Item | Why not |
+|---|---|
+| `POST /cm cmnd=nav esc` against a running blocking verb | **The highest-value untested item.** Reached the point of having HTTP working and authenticated, but the login path aborts/wedges the device under load (ISSUE-18) before a blocking verb could be started and rescued. Needs ISSUE-18 addressed first, or a session where a physical reset is available. Still **code-verified only** (`webInterface.cpp:537-556` writes `EscPress` directly, ahead of the queue). |
+| `/getscreen`, `/listfiles`, `/file`, `/upload`, `/edit`, `/rename`, WS `/ws` | Same blocker. `GET /` (200) and `GET /systeminfo` (401 unauth) are the only routes exercised. |
+| `badusb run_from_file` / `run_from_buffer`, BLE HID variant | **Deliberately skipped.** It emits real USB HID keystrokes into the attached host — here, the laptop running the test session, whose focused window is a terminal. Unsafe unattended; needs an attended session with a scratch window focused. Note `print`/`println` in JS are the *badusb* natives (`mqjs_stdlib.h`), so JS payloads carry the same hazard. |
+| `wifi add` / `wifi on` / `wifi off` | The user chose the AP path for this session, which does not exercise them. Zero evidence either way. |
+| FastPair **handset** popup after `c9c43c03` | Radio level is proven (8-13 valid `0xFE2C` adverts per run); handset level remains UNVERIFIED. Needs the user's iPhone, and "Nearby device scanning" enabled on the Android first so a negative result means something. |
+| Evil Portal capturing a real credential, and under load | Needs a phone associating and typing. Still only ever run idle (ISSUE-1 predicts load is the real crash risk). |
+| `poweroff`, `sleep` | Would take the device down with nobody present to power-cycle it. `reboot` was tested instead and passed 2/2. |
+| `blespam random`/`all`, interactive `blespam menu` | Menu-driven; needs on-device dismissal. |
+| MTU 247 negotiation | BlueZ negotiates 128 and will not go higher; needs an Android client. Chunking remains half-verified. |
+| `[TRUNCATED: device low on memory]` marker | Never observed — and notably **did not appear** in the one case that should have triggered it (ISSUE-16), where replies were silently cut instead. |
+| ISSUE-17 leak vs. one-off allocation | Distinguishing them needs `free` sampled after each individual `js` run; only aggregate before/after was measured. |
 
 ---
 
