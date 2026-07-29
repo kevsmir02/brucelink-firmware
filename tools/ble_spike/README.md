@@ -22,6 +22,30 @@ is only needed once — but a flash that wipes the config file resets it to off.
 .venv/bin/python tools/ble_spike/spike_events.py
 ```
 
+## The 2026-07-29 investigation harness
+
+Added while auditing the verb surface against hardware. These are general-purpose;
+the `spike_*.py` scripts below are the original targeted regression tests.
+
+| Script | Use |
+|---|---|
+| `blecli.py <verb>...` | Send arbitrary verbs over BLE, print each reply. The workhorse. |
+| `waitready.py <sec>` | Poll until the device answers `uptime` again. Chains a test to start automatically after a manual RST. |
+| `usbwatch2.py <sec>` | Capture `/dev/ttyACM0` with timestamps, reopening across reboots. **The only place a panic backtrace appears.** |
+| `verbtest.py <verb> <sec>` | Dispatch a verb, capture BLE + USB together, print a VERDICT with any assertion/backtrace. Used for the crash sweep. |
+| `swaptest.py <verb>` | Full `blespam` transport-swap trace: suspend notice, link drop, `RAM_LOG` stage markers, recovery timing. |
+| `sniff2.py <verb> <sec>` | **Packet capture.** Sends a spam verb, waits for the BLE API to suspend itself, then scans and tallies what is actually on the air by company ID and service UUID. |
+
+`sniff2.py` is the one to reach for when a feature "does nothing" — it settled
+ISSUE-8 by showing the FastPair payload going out under a bogus company ID, with no
+handset involved.
+
+**Discovery caveat that cost a day.** Do not identify the device with
+`find_device_by_name("Bruc")`. After several spam types the name and service UUID are
+dropped from the advertisement and the BT MAC changes (ISSUE-9), so name-based
+discovery reports a healthy device as missing. Match on the service UUID, or connect
+by address and probe for the CLI characteristic.
+
 ## What each covers
 
 **`spike_transport.py`** — the CLI characteristic (`d555ed97-…`):
