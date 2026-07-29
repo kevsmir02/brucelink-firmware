@@ -104,8 +104,45 @@ Notes from the sweep:
   `{"id":4,"type":"state","device_state":"portal"}`. This reproduces maritest's
   2026-07-27 observation.
 
-**Only `deauth` crashes.** That is a narrower blast radius than feared, and the shape
-of the exception is informative. `wifi_atk_menu`'s `loopOptions` path drives `drawArc`
+**CONFIRMED 2026-07-29: `evilportal` crashes too, under load.** The hypothesis below
+was tested and held. With a client associated and portal pages being requested, the
+device asserted after ~11 minutes with the **identical** assertion, and an ELF-matched
+backtrace (`b02178b48`) whose shape is the same cross-task SPI release:
+
+```
+assert failed: xTaskPriorityDisinherit tasks.c:5156 (pxTCB == pxCurrentTCBs[ xPortGetCoreID() ])
+
+_serialCmdsTaskLoop          serialcmds.cpp:84        <- the serial task
+handleSerialCommands         serialcmds.cpp:66
+SimpleCLI::parse             SimpleCLI.cpp:55
+evilportalCmdCallback        attack_commands.cpp:52   <- fork code
+EvilPortal::loop             evil_portal.cpp:305
+EvilPortal::drawScreen       evil_portal.cpp:429
+drawMainBorderWithTitle      display.cpp:1049
+drawMainBorder               display.cpp:1041
+drawStatusBar                display.cpp:948
+drawBatteryStatus            display.cpp:1108
+tft_logger::drawRoundRect    tftLogger.cpp:349
+TFT_eSPI::drawRoundRect      TFT_eSPI.cpp:2650
+TFT_eSPI::drawCircleHelper   TFT_eSPI.cpp:2429
+TFT_eSPI::end_tft_write      TFT_eSPI.cpp:114
+SPIClass::endTransaction     SPI.cpp:211
+spiEndTransaction            esp32-hal-spi.c:1336     -> assert
+```
+
+Note `drawStatusBar` → `drawBatteryStatus` in the serial task's stack: this is the
+**same status bar the main loop redraws on its 30 s timer**, which is precisely the
+collision the entry predicted. So the trigger is not `drawArc` specifically — any
+sustained drawing from the serial task will do, and `deauth` was simply the fastest
+way to get there.
+
+**Revised scope: `deauth` and `evilportal`-under-load both crash, with the same
+assertion.** The idle result below stands — `evilportal` survived 100 s with nothing
+associating — which means **an idle test of any of these verbs proves nothing**. The
+survivors in the table were all tested idle for 90 s.
+
+**Only `deauth` crashes when idle.** That is a narrower blast radius than feared, and
+the shape of the exception is informative. `wifi_atk_menu`'s `loopOptions` path drives `drawArc`
 **continuously**. Every verb that survived redraws only on an event:
 `ScrollableTextArea` redraws on input (`ap_info`), and `EvilPortal::loop()` calls
 `drawScreen()` only when `shouldRedraw` is set — on a credential capture, a WiFi
@@ -116,10 +153,11 @@ serial task, not merely *any* drawing. Two consequences, both unproven:
 
 - A quiet UI is not a safe UI, it is an unlikely-to-collide one. A clean 90 s window
   is **not** proof — `deauth` itself survived 70+ s on its first run before dying.
-- **`evilportal` was tested idle**, with nothing associating to the portal. Under real
-  load — phones connecting, credentials landing — `shouldRedraw` fires repeatedly and
-  its drawing pattern moves toward `deauth`'s. That case has **not** been tested and
-  is the obvious next experiment.
+- ~~**`evilportal` was tested idle**… That case has **not** been tested and is the
+  obvious next experiment.~~ **Done 2026-07-29 — the prediction was correct.** See the
+  confirmation above. This is recorded rather than deleted because it is the one case
+  where a stated hypothesis was tested and held, which is worth as much as the
+  rejections in ISSUE-11 and ISSUE-12.
 
 **Consequences for the companion app.** These verbs cannot be shipped as one-tap
 actions. The failure is worse than the documented one: the app does not merely lose
@@ -902,6 +940,51 @@ the more interesting option anyway since it needs no cable to the target.
 
 ---
 
+### ISSUE-21 — Evil Portal cannot serve its own page on this board
+
+**Status:** OPEN · **Severity:** high (the attack is inert — no victim ever sees a
+form) · **Verified** 2026-07-29 · **Two clients, 7 failed fetches**
+
+The portal starts, advertises, and hands out DHCP leases, but does not serve a usable
+page. The AP works; the HTTP responder does not.
+
+**Observed**, `evilportal BL_PORTAL_TEST 6` with the BLE API armed:
+
+- The AP appears as an **open** network (`softAP(apName, emptyString, _channel)`,
+  `evil_portal.cpp:136`) and DHCP works — a laptop got `172.0.0.4/24`, gateway
+  `172.0.0.1`.
+- A phone loaded the portal and got an **incomplete page**: logo area present, **both
+  form fields absent**. A complete default page is **4,726 bytes**
+  (`loadDefaultHtml()`, `evil_portal.cpp:599-655`) and the `email`/`password` inputs
+  live in its last ~600 bytes — exactly where a truncated response would cut off.
+- From a laptop, with the phone disconnected and **only one client associated**, the
+  gateway answered **neither HTTP nor ICMP**: 7 `curl` attempts across two sessions
+  all returned `http=000`, and `ping` reported 100% loss.
+- The console was **silent throughout** — no allocation error, no warning.
+
+**Consequence:** no credential can be captured, because no victim is ever shown a
+form. `md5 /BruceEvilCreds/_creds.csv` was **unchanged** (`f42bfe126ee98b466e4349e666fadd4c`)
+before and after the run, confirming nothing was written.
+
+**Cause SUSPECTED, not established: memory.** It is consistent with everything else
+measured on this board — the WebUI needs ~18 KB of margin and fails silently below it
+(ISSUE-12), and a 4,726-byte response plus AsyncTCP buffers is a large ask when the
+BLE API is holding ~62 KB. But **the free-heap number that would prove it was never
+captured**, because `evilportal` blocks the CLI for its entire life and the device
+crashed (ISSUE-1) before it could be released. Do not record this as proven.
+
+**Distinguishing experiment:** run `evilportal` with the BLE API disarmed and measure
+`free` from the USB console, or add a RAMLOG stage inside `portalController`. Either
+would separate "not enough heap for the response" from "the responder is broken".
+
+**Telemetry gap found alongside.** `recordPageView()` is called on every portal hit
+but never emits an event — verified in code and on the wire, with the event
+characteristic subscribed for 542 s. The only frame the whole run produced was
+`{"id":12,"type":"state","device_state":"portal"}` at +2.72 s. **The app cannot tell
+that anyone loaded the portal, nor that a credential was captured.**
+
+---
+
 ## Not tested, and why
 
 Recorded so the gap is visible rather than implied. Session of 2026-07-29, unattended.
@@ -917,7 +1000,9 @@ Recorded so the gap is visible rather than implied. Session of 2026-07-29, unatt
 | JS `print`/`println` | Untested and hazardous for the same reason as `badusb`: they are the badusb HID natives (`mqjs_stdlib.h`), not console output. |
 | `wifi add` / `wifi on` / `wifi off` | The user chose the AP path for this session, which does not exercise them. Zero evidence either way. |
 | ~~FastPair **handset** popup after `c9c43c03`~~ | **DONE 2026-07-29** — Android popup confirmed by the user, with 16 valid `0xFE2C` adverts captured concurrently. See §Resolved ISSUE-8. |
-| Evil Portal capturing a real credential, and under load | Needs a phone associating and typing. Still only ever run idle (ISSUE-1 predicts load is the real crash risk). |
+| ~~Evil Portal under load~~ | **DONE 2026-07-29** — it crashes, same assertion as `deauth`. Confirms the ISSUE-1 hypothesis; see ISSUE-1. |
+| Evil Portal capturing a real credential | **Still untested, and now blocked** — the portal never serves a form (ISSUE-21), so there is nothing to submit. `md5` of the creds file was unchanged across the run, so this is confirmed-not-tested rather than assumed. |
+| Free heap during an active Evil Portal | Not captured. The verb blocks the CLI for its whole life and the device crashed before release. Needed to prove or reject the memory hypothesis in ISSUE-21. |
 | `poweroff`, `sleep` | Would take the device down with nobody present to power-cycle it. `reboot` was tested instead and passed 2/2. |
 | `blespam random`/`all`, interactive `blespam menu` | Menu-driven; needs on-device dismissal. |
 | MTU 247 negotiation | BlueZ negotiates 128 and will not go higher; needs an Android client. Chunking remains half-verified. |
