@@ -6,6 +6,7 @@
 #include <globals.h>
 #if !defined(LITE_VERSION)
 #include "core/wifi/ws_events.h"
+#include "modules/wifi/evil_portal_bg.h"
 #endif
 
 QueueHandle_t cmdQueue = nullptr;
@@ -49,6 +50,14 @@ static void redrawUnlessNavigation(const String &command) {
 }
 
 void handleSerialCommands(SerialCli &serialCli) {
+#if !defined(LITE_VERSION)
+    // Pumped from this task because it already ticks every 10 ms and, unlike the
+    // main loop, never sinks into an on-device menu. It must run before the
+    // hasLine() early return below, or it would only tick when a command
+    // happened to be waiting.
+    evilPortalBgTick();
+#endif
+
     CmdPacket packet;
     if (cmdQueue && rspQueue) {
         if (xQueueReceive(cmdQueue, &packet, 0) == pdTRUE) {
