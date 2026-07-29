@@ -5,6 +5,7 @@
 #include "core/wifi/wifi_common.h"
 #include "core/wifi/ws_events.h"
 #include "modules/wifi/evil_portal.h"
+#include "modules/wifi/evil_portal_bg.h"
 #include "modules/ble/BLE_Suite.h"
 #include "modules/ble/ble_spam.h"
 #include "modules/wifi/karma_attack.h"
@@ -34,6 +35,15 @@ uint32_t bleApiCmdCallback(cmd *c) {
 
 uint32_t evilportalCmdCallback(cmd *c) {
     Command cmd(c);
+
+    // Flags are handled before the start path so -off and -status can never
+    // bring a portal up as a side effect.
+    if (cmd.getArgument("off").isSet()) { return evilPortalBgStop(); }
+    if (cmd.getArgument("status").isSet()) {
+        serialDevice->println(evilPortalBgStatus());
+        return true;
+    }
+
     String ssid = cmd.getArgument("ssid").getValue();
     String chStr = cmd.getArgument("channel").getValue();
     String templateFile = cmd.getArgument("template").getValue();
@@ -48,6 +58,15 @@ uint32_t evilportalCmdCallback(cmd *c) {
     if (bruceConfig.evilPortalGatewayIp.isEmpty()) {
         bruceConfig.evilPortalGatewayIp = "192.168.4.1";
     }
+
+    if (cmd.getArgument("bg").isSet()) {
+        String durStr = cmd.getArgument("duration").getValue();
+        durStr.trim();
+        long duration = durStr.toInt();
+        if (duration < 0) duration = 0;
+        return evilPortalBgStart(ssid, channel, templateFile, (uint32_t)duration);
+    }
+
     setDeviceState("portal");
     EvilPortal(ssid, channel, false, false, true, false, templateFile);
     setDeviceState("idle");
@@ -183,6 +202,13 @@ void createAttackCommands(SimpleCLI *cli) {
     evilportal.addPosArg("ssid", "Free Wifi");
     evilportal.addPosArg("channel", "6");
     evilportal.addPosArg("template", "");
+    evilportal.addFlagArg("bg");
+    evilportal.addFlagArg("off");
+    evilportal.addFlagArg("status");
+    // 0 disables the cap. The default is deliberately finite: with ble api off
+    // nothing can reach the device to stop a portal, so the clock is the only
+    // recovery path.
+    evilportal.addArg("duration", "600");
 
     Command blespam = cli->addCommand("blespam", blespamCmdCallback);
     blespam.addPosArg("type", "fastpair_regular");
