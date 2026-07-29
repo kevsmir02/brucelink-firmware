@@ -190,6 +190,24 @@ entry points that take their parameters as arguments (the approach `blespam` alr
 uses successfully). The second also fixes the "requires on-device interaction"
 limitation, so it is the better target.
 
+**Fix applied in `2d9422ea`; two independent confirmations 2026-07-29.** The mutex was
+scoped to the *call* when the thing needing protection is the *transaction* — see that
+commit for the full mechanism. On ELF `5186685c0fdf19c2`:
+
+| Verb | Before | After |
+|---|---|---|
+| `deauth` | crashed 2/2 in 20–70 s | **21 min clean** |
+| `blesniffer` | only ever idle-tested 90 s | **13 min clean** |
+
+`blesniffer` matters as a second case because `BleSuiteMenu()` is also a
+`loopOptions`, so it reproduces the same continuous-redraw-from-the-serial-task
+condition through a different verb. Neither run produced an `assert failed`,
+`Backtrace:`, `rst:0x` or `ESP-ROM` marker.
+
+**Kept OPEN deliberately.** This is a probabilistic result against a race, not a proof.
+The `evilportal`-under-load case remains unconfirmed for an unrelated reason: that run
+starved itself to 163 bytes and exited before the drawing could collide (ISSUE-21).
+
 ---
 
 ### ISSUE-2 — `settings` with no arguments returns nothing over BLE
@@ -702,6 +720,21 @@ complete 297 bytes.
 missing EOT is not proof the device is wedged. The app should treat a missing EOT as
 "retry", and should not render a file listing as authoritative after heavy WiFi use.
 
+**Reproduced deliberately 2026-07-29, with the cause identified.** With the BLE API
+armed, the AP up and the WebUI running (15,167 free / DMA 6,900), a single HTTP
+request for real content drove free heap to **812 bytes**. At that point BLE replies
+came back **empty** — `free` returned 3 bytes, `systeminfo` returned 1 — with the EOT
+terminator present and **no `[TRUNCATED: device low on memory]` marker**.
+
+So the marker does not fire in the exact condition it exists for. The reply is not
+being truncated mid-chunk by a failed notify; the device cannot allocate the reply
+**string** in the first place, so there is nothing to truncate and nothing to flag.
+
+The commands still executed: `webui -off` issued in that state returned
+`WebUI stopped` and recovered the heap to 57,295. **An empty reply means "the device
+could not build an answer", not "the device did not act".** An app must not retry on
+an empty reply — the side effect has already happened.
+
 ---
 
 ### ISSUE-17 — the JS interpreter permanently retains ~18 KB of internal heap
@@ -1067,6 +1100,98 @@ characteristic subscribed for 542 s. The only frame the whole run produced was
 `{"id":12,"type":"state","device_state":"portal"}` at +2.72 s. **The app cannot tell
 that anyone loaded the portal, nor that a credential was captured.**
 
+**The missing measurement, obtained 2026-07-29.** This entry recorded that free heap
+during an active portal had never been captured, because the verb blocks the CLI for
+its whole life. It was captured accidentally during an unrelated test: across one
+portal run with two clients associating, `minEver` fell from **31,559 to 163 bytes**.
+
+That single number accounts for every symptom at once — no page served, a second
+client unable to associate, and the portal exiting unprompted. **The cause is memory
+exhaustion, not a routing or handler defect**, which makes fixing it a different piece
+of work than previously scoped.
+
+Consistent with the transport finding in the contract §1: with the BLE API armed there
+is not enough heap to serve HTTP content at all. With `ble api off` (121,247 free)
+every HTTP route returns 200 sub-second. **The portal has never been tested with BLE
+off** — that is the obvious next experiment and may make it work as designed.
+
+Also observed and **unexplained**: the portal exited with nobody touching the device,
+contradicting the documented "no timeout, exits only via Esc → Exit Portal". Likely an
+allocation failure down some path, but that is a guess and is not recorded as fact.
+
+---
+
+### ISSUE-22 — there is no serial CLI on this board; BLE is the only command interface
+
+**Status:** OPEN · **Severity:** high (determines the recovery story) · **Verified** 2026-07-29
+
+`USBserial` wraps the Arduino `Serial` object, and on this board `Serial` does **not**
+reach `/dev/ttyACM0`. Tested with the BLE API off, so nothing else owned
+`serialDevice`: `uptime` and `free` were written to the port with CRLF, with LF, and
+with a bare newline, and **zero bytes** came back in every case.
+
+The ESP-IDF console output this project has relied on all day — panics, backtraces,
+`RAMLOG` markers, `log_e` — arrives on a **separate channel**. Reading that port is
+not the same as talking to the CLI.
+
+**Consequences.**
+
+- **BLE is the only remote command interface that exists.** With `ble api off` and no
+  WebUI running, the device has **no** remote control surface; recovery is the
+  on-device Config menu.
+- The app must never drop BLE without first starting the WebUI (see the contract §1
+  switch workflow), or it strands the device.
+- This is the real mechanism behind **ISSUE-2**: `settings` wrote the config to
+  `Serial`, which reaches nobody, on *any* transport.
+- It is also why a `Serial.println` diagnostic added while fixing ISSUE-20 was
+  invisible until it was changed to `log_e`. **Firmware diagnostics on this board must
+  use `log_e`/ESP_LOG, never `Serial.println`.**
+
+**Recorded as a corrected prediction:** it was expected that turning the BLE API off
+would hand the CLI back to USB, because `bleApi.end()` sets
+`serialDevice = &USBserial` (`ble_api.cpp:110`). It does — but that object is not
+connected to anything reachable.
+
+---
+
+### ISSUE-23 — WiFi credentials are stored in plaintext and readable over an unauthenticated link
+
+**Status:** OPEN · **Severity:** high (secret disclosure) · **Verified** 2026-07-29
+
+`wifi add <ssid> <pwd>` stores the password verbatim and writes it to flash
+(`config.cpp:659-662`):
+
+```cpp
+void BruceConfig::addWifiCredential(const String &ssid, const String &pwd) {
+    wifi[ssid] = pwd;   // plaintext
+    saveFile();
+}
+```
+
+`settings` with no arguments returns that whole config. Demonstrated on hardware with
+a deliberately fake credential:
+
+```json
+"wifi": { "TESTNET_FAKE": "notarealpassword" }
+```
+
+The same dump also carries `webUI: {"user": "admin", "pwd": "bruce"}` and the active
+`webUISessions` tokens.
+
+**The BLE command bus has no authentication of any kind.** Any client in range that
+connects can read all of it.
+
+**This exposure was widened by the ISSUE-2 fix in `b1c825c8`, deliberately and with
+eyes open.** Before it, the dump went to `Serial` and reached nobody (ISSUE-22), so
+the secrets were unreachable by accident rather than by design. Making `settings`
+work — which the app needs — made them readable. The fix is not the defect; the
+absent authentication is.
+
+**Mitigations, none implemented:** redact secret-bearing fields from the `settings`
+dump; or require pairing/bonding on the GATT service; or keep credentials out of the
+serialised config. Until then, **do not store real network credentials on this
+device**, and treat anything in `bruce.conf` as public to anyone within BLE range.
+
 ---
 
 ## Not tested, and why
@@ -1080,7 +1205,7 @@ Recorded so the gap is visible rather than implied. Session of 2026-07-29, unatt
 | Whether `pwngrid` is rescuable | It is the only other blocking verb that appears to touch neither radio, so it should be, but it was not tested. |
 | `/getscreen`, `/listfiles`, `/file`, `/upload`, `/edit`, `/rename`, WS `/ws` | Same blocker. `GET /` (200) and `GET /systeminfo` (401 unauth) are the only routes exercised. |
 | ~~`badusb run_from_file`~~ | **DONE 2026-07-29, attended** — types nothing and hangs the device forever. See ISSUE-20. |
-| `badusb` **BLE HID** variant (`ducky_startKb(..., ble=true)`) | Not tested. It is a different branch that builds a `BleKeyboard` and never touches TinyUSB, so ISSUE-20 does **not** necessarily apply to it. More useful than the USB path anyway — no cable to the target. |
+| ~~`badusb` **BLE HID** variant~~ | **NOT REACHABLE 2026-07-29** — not a testing gap. Both CLI callbacks hardcode the transport: `ducky_startKb(hid_usb, false)` at `badusb_commands.cpp:31` and `:64`, and the verb takes no `ble` argument (`run_from_file <filepath>`, `run_from_buffer`). `ducky_startKb(..., ble=true)` exists but only the on-device menu reaches it. Combined with ISSUE-20 this means **BadUSB is entirely unavailable to the companion app**: the USB branch cannot enumerate on this build, and the BLE branch is not wired to the command bus. Exposing it needs a new verb or an argument, not a test. |
 | JS `print`/`println` | Untested and hazardous for the same reason as `badusb`: they are the badusb HID natives (`mqjs_stdlib.h`), not console output. |
 | `wifi add` / `wifi on` / `wifi off` | The user chose the AP path for this session, which does not exercise them. Zero evidence either way. |
 | ~~FastPair **handset** popup after `c9c43c03`~~ | **DONE 2026-07-29** — Android popup confirmed by the user, with 16 valid `0xFE2C` adverts captured concurrently. See §Resolved ISSUE-8. |

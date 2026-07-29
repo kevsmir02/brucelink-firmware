@@ -51,7 +51,50 @@ Every verb works identically over either.
 an HTTP connection depends on. A BLE connection survives both `deauth` and Evil
 Portal and carries CLI traffic throughout — verified on smoochiee-board 2026-07-27.
 
-**The two transports are not meant to run simultaneously.** Fully loaded with BLE
+**The two transports cannot run simultaneously — they must alternate.** This is
+stronger than the earlier "not meant to", and it was measured on 2026-07-29 by running
+the same request in both configurations on the same device in the same session:
+
+| | BLE armed (15,167 free) | BLE off (121,247 free) |
+|---|---|---|
+| `POST /login` | **timeout** at 12 s *and* 60 s, twice | **302 + cookie in 0.40 s** |
+| Any route returning a body | **timeout** | **200, all sub-second** |
+| BLE replies at the same time | **empty**, no `[TRUNCATED]` marker (ISSUE-16) | n/a |
+
+With BLE armed, a single HTTP request for real content drove free heap to **812
+bytes** and broke *both* transports at once. Only tiny replies (a `401`) survived.
+`ble api off` frees **63,576 bytes** and everything works immediately.
+
+**The switch workflow, verified end to end 2026-07-29:**
+
+1. BLE is primary control.
+2. `webui -bg` over BLE — starts the AP and the WebUI.
+3. `ble api off` over BLE — frees ~63.5 KB. The BLE link drops; this is expected.
+4. Do all bulk work over HTTP (`/getscreen`, `/listfiles`, `/file`, `/`).
+5. `POST /cm?cmnd=ble api on` over HTTP — BLE returns on the factory MAC and
+   `bleApiAutoStart` is restored to `1`.
+
+Each transport can restore the other, so **the app is never stranded** — provided it
+starts the WebUI *before* dropping BLE. If it drops BLE with no WebUI running, there
+is no way back except the on-device menu (§2.3).
+
+Measured HTTP performance with BLE off, all authenticated:
+
+| Route | Status | Size | Time |
+|---|---|---|---|
+| `/systeminfo` | 200 | 468 B | 0.30 s |
+| `/getscreen` | 200 | 450 B | 0.01 s |
+| `/listfiles?folder=/&fs=LittleFS` | 200 | 360 B | 0.20 s |
+| `/file?…&action=download&fs=LittleFS` | 200 | 1,956 B | 0.10 s |
+| `/` (index, gzipped) | 200 | 4,708 B | 0.10 s |
+| `POST /cm?cmnd=uptime` | 200 | 21 B | 0.01 s |
+| `GET /cm` | **404** | 22 B | — confirms POST-only |
+
+**Sequence matters for memory.** From a clean boot, `webui -bg` leaves 15,167 free /
+DMA 6,900. Running `wifi on` *first* and then `webui -bg` leaves only 11,176 free /
+DMA 3,060 — `wifi on` costs ~53 KB and fragments away half the DMA block.
+
+**The original claim, retained because it is still true:** Fully loaded with BLE
 API + WiFi AP + WebUI the board has ~15 KB free (measured **14,951 bytes**,
 2026-07-29), and a single associated station drives that to a few hundred bytes, at
 which point notifies truncate and HTTP dies
@@ -71,6 +114,29 @@ verified over BLE 2026-07-29; see §7.1 for the full heap figures.
 | Event characteristic | `d555ed98-bf2a-4f46-b3eb-d1fcdd7325e9` — READ \| NOTIFY | `BLESerialService.cpp:80` |
 | Battery service | `0x180F` / `0x2A19` (READ \| NOTIFY) | `BatteryService.cpp` |
 | Response terminator | `0x04` (EOT) | `BLESerialService.h:22` |
+
+**Full GATT map**, enumerated on hardware 2026-07-29 (nothing else is exposed):
+
+| Service | Characteristics |
+|---|---|
+| `0x1801` Generic Attribute | `0x2A05` indicate, `0x2B29` read/write, `0x2B3A` read |
+| `0x180F` Battery Service | `0x2A19` **read, notify** |
+| `4371ec0b-…` Bruce | `d555ed97` CLI (read/write/notify), `d555ed98` events (read/notify) |
+| `0x1800` Generic Access | `0x2A01`, `0x2A00` read |
+
+**Use `0x2A19` as a liveness probe.** GATT reads on characteristics *other than* the
+CLI keep working while the serial task is blocked by a verb — verified 2026-07-29 by
+reading the Battery Service during an active `blesniffer`. This is the only reliable
+way to distinguish **"device blocked"** from **"device dead"**, and the app should use
+it before concluding a device is gone: a successful `0x2A19` read means the firmware
+is alive and merely wedged, so the right UI is "busy", not "disconnected".
+
+Not having this distinction cost real time — a blocked device was repeatedly mistaken
+for a crashed one during testing.
+
+⚠️ **The value it returns is not a battery level.** `0x2A19` reads `1` on a board with
+no PMU fitted, the same fabricated figure `/systeminfo` reports (ISSUE-3). Treat it as
+a liveness signal only, never as a charge percentage.
 
 ### 2.1 Framing
 
@@ -115,7 +181,21 @@ Events are **dropped, not queued**, when nobody is subscribed
 - Bruce AP or shared LAN. mDNS `http://<host>.local/`.
 - Auth: cookie `BRUCESESSION=<token>` after `POST /login`, **or**
   `Authorization: Bearer <token>` (`webInterface.cpp:176` — checked before the
-  cookie; `/login` also returns `{token}` as JSON).
+  cookie).
+
+  ⚠️ **`POST /login` takes form fields `username` and `password`** — not JSON, and
+  not `user`/`pwd`. The handler tests
+  `request->hasParam("username", true) && request->hasParam("password", true)`
+  (`webInterface.cpp:425`). Corrected 2026-07-29; this document previously said
+  `{user,pwd}` as JSON, which **fails silently**: the device answers `200` with the
+  gzipped login page and **no `Set-Cookie`**, so the client believes it succeeded and
+  every subsequent request gets a `401`.
+
+  A correct login returns **`302`**, `Location: /`, and
+  `Set-Cookie: BRUCESESSION=<token>; Path=/; HttpOnly`. There is no `{token}` JSON
+  body — that claim was also wrong. Measured 0.40 s (BLE off).
+
+  Follow redirects **off** when logging in, or the `Set-Cookie` is lost.
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -127,7 +207,7 @@ Events are **dropped, not queued**, when nobody is subscribed
 | POST | `/edit` | write file |
 | POST | `/upload` | upload file |
 | POST | `/rename` | rename file/folder |
-| POST | `/login` `{user,pwd}` | → `Set-Cookie BRUCESESSION=`, plus `{token}` |
+| POST | `/login` form `username`,`password` | → `302` + `Set-Cookie BRUCESESSION=`. **Not JSON** — see §3 |
 | GET | `/logout` | invalidate session |
 | GET | `/reboot` | `ESP.restart()` |
 | WS | `/ws` | Event stream (§4) |

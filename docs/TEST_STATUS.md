@@ -12,7 +12,7 @@ measurement (device + date) or a code fact (`file:line`). Nothing here is inferr
 
 **Hardware under test:** bare ESP32‑S3‑N16R8 devkit, 1.47" 172×320 IPS LCD on SPI,
 five buttons, USB powered. No PMU, SD, CC1101, NRF24, PN532, IR or GPS. Env
-`smoochiee-board`. Firmware `b1c825c8`, ELF `4bdcd1dc364fd2cf`.
+`smoochiee-board`. Firmware `2d9422ea`, ELF `5186685c0fdf19c2`.
 
 ---
 
@@ -49,6 +49,11 @@ Verified end-to-end on hardware, safe to expose as a one-tap action.
 | `screen brightness` | Takes **0–255**, not 0–100. |
 | BLE transport | Framing, EOT, chunking, event characteristic, gap-free event IDs, boot persistence. |
 | HTTP `POST /cm` + auth | Cookie and 401 paths verified. AP gateway is **172.0.0.1**. |
+| **All HTTP routes** | `/systeminfo`, `/getscreen`, `/listfiles`, `/file`, `/`, `POST /cm` — all 200 and sub-second, **but only with `ble api off`**. See contract §1. |
+| `wifi add` / `on` / `off` | Verified. `add` is a silent success; `on` falls back to AP in 9.3 s and costs ~53 KB. |
+| Transport switch | BLE → `ble api off` → HTTP bulk → `POST /cm cmnd=ble api on` → BLE. Round trip verified; each transport restores the other. |
+| `blespam random`/`all` | Works, recovers with factory MAC and name intact. |
+| GATT liveness probe | Reading `0x2A19` works **while the CLI is blocked** — the only way to tell "blocked" from "dead". |
 | HTTP `nav` rescue | Releases a blocked verb — **but see the limits in ISSUE-19.** |
 
 ## Broken — do not ship
@@ -58,6 +63,9 @@ Verified end-to-end on hardware, safe to expose as a one-tap action.
 | `deauth` | Crashes the device (SPI mutex, cross-task) | ISSUE-1 |
 | `evilportal` | Crashes **under load**, same assertion; and cannot serve its own page | ISSUE-1, ISSUE-21 |
 | `badusb` (USB HID) | Types nothing. No longer hangs — returns in 9.3 s (`b1c825c8`) | ISSUE-20 |
+| `badusb` (BLE HID) | **Not reachable** — no CLI path exists at all | ISSUE-20 |
+| Serial CLI over USB | **Does not exist on this board.** BLE is the only command interface | ISSUE-22 |
+| Both transports at once | Cannot coexist — one HTTP request with BLE armed drives heap to 812 B | ISSUE-16, ISSUE-21 |
 | `badusb` (BLE HID) | **Untested** — different branch, may work | ISSUE-20 |
 | `js` output/errors | Interpreter runs, but no return channel at all | ISSUE-15 |
 | `rf rx`, `md5`/`stat` on a missing file | Silent failure, empty reply | ISSUE-13 §context |
@@ -71,6 +79,9 @@ Verified end-to-end on hardware, safe to expose as a one-tap action.
 | `nav` rescue needs repeated pulses | One pulse fails. Pulse until the device answers. Minimum not bisected. |
 | WebUI margin is ~18 KB | Starts from a clean boot; fails silently if anything consumed heap first (ISSUE-12). A JS run alone is enough to break it (ISSUE-17). |
 | Discover by service UUID, never by name | `4371ec0b-3d43-49f9-b731-7c72a4a7bb91`. |
+| Transports alternate, never coexist | Start the WebUI **before** dropping BLE, or the device is stranded (ISSUE-22). |
+| `POST /login` is form-encoded | Fields are `username`/`password`, **not** JSON `{user,pwd}`. Wrong form fails silently with a 200 and no cookie. |
+| Never store real WiFi credentials | Plaintext in the config, readable over an unauthenticated BLE link (ISSUE-23). |
 | BLE replies can truncate silently | No `[TRUNCATED]` marker. Treat a missing EOT as "retry" (ISSUE-16). Hash files, don't eyeball listings. |
 | No battery UI | `battery_pct` still permanently 1 (ISSUE-3 partial — the I²C storm is fixed, the reporting is not). |
 | Never gate on `capabilities` | Compile-time flags (ISSUE-4). |
@@ -88,10 +99,12 @@ The honest gap. See §"Not tested, and why" in KNOWN_ISSUES.md for the full tabl
 - **`badusb` over BLE HID** — a different branch (`ducky_startKb(..., ble=true)`) that
   never touches TinyUSB, so ISSUE-20 may not apply. More useful than the USB path.
 - **Evil Portal credential capture** — blocked by ISSUE-21; there is no form to submit.
-- **`wifi add` / `wifi on` / `wifi off`** — zero evidence. BLE WiFi provisioning is a
-  headline app feature.
-- **HTTP file routes** — `/getscreen`, `/listfiles`, `/file`, `/upload`, `/edit`,
-  `/rename`, WS `/ws`.
+- **`/upload`, `/edit`, `/rename`, WS `/ws`** — the write-side HTTP routes and the
+  WebSocket. The read-side routes are all verified; these were not exercised.
+- **Evil Portal with `ble api off`** — never tried. ISSUE-21 may simply be the memory
+  ceiling, in which case the portal could work in the BLE-off configuration.
+- **`blesniffer` / `karma` / `pwngrid` / `ap_info` genuinely under load** — `blesniffer`
+  now has 13 min of continuous redraw behind it, but no external load was applied.
 - **`poweroff` / `sleep`** — need someone present to power-cycle.
 - **MTU 247** — BlueZ caps at 128; needs an Android client.
 - **ISSUE-17 leak vs. one-off cache** — needs `free` sampled after each `js` run.
