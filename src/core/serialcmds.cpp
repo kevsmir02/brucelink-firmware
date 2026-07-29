@@ -37,6 +37,17 @@ bool parseSerialCommand(const String &command, bool waitForResponse) {
     return false;
 }
 
+// A verb that drew to the screen leaves its last frame there, which is
+// indistinguishable from a hang to anyone looking at the device. `nav` and
+// `option` are exempt because they exist to move around that UI — repainting
+// would undo the navigation the caller just asked for.
+static void redrawUnlessNavigation(const String &command) {
+    String trimmed = command;
+    trimmed.trim();
+    if (trimmed.startsWith("nav") || trimmed.startsWith("option")) return;
+    backToMenu();
+}
+
 void handleSerialCommands(SerialCli &serialCli) {
     CmdPacket packet;
     if (cmdQueue && rspQueue) {
@@ -51,6 +62,7 @@ void handleSerialCommands(SerialCli &serialCli) {
 #if !defined(LITE_VERSION)
             pushWsLog(String("[CLI] Result: ") + (result ? "TRUE" : "FALSE"), "info");
 #endif
+            redrawUnlessNavigation(String(packet.text));
         }
     }
     // hasLine(), not available(): on BLE a command can arrive split across
@@ -70,12 +82,7 @@ void handleSerialCommands(SerialCli &serialCli) {
     serialDevice->print("# "); // prompt, for a human at a console
     serialDevice->endOfResponse(); // unambiguous boundary, for a programmatic client
 
-    // forced menu redrawn if the command is not "nav" or "option"
-    // it allows navigation commands to be executed without returning to the menu, while other commands will
-    // return to the menu after execution.
-    String cmd_trimmed = cmd_str;
-    cmd_trimmed.trim();
-    if (!cmd_trimmed.startsWith("nav") && !cmd_trimmed.startsWith("option")) { backToMenu(); }
+    redrawUnlessNavigation(cmd_str);
 }
 
 void _serialCmdsTaskLoop(void *pvParameters) {
