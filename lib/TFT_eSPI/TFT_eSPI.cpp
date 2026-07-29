@@ -75,10 +75,28 @@ SemaphoreHandle_t tftMutex;
 ** Function name:           begin_tft_write (was called spi_begin)
 ** Description:             Start SPI transaction for writes and select TFT
 ***************************************************************************************/
+// A note on the two xSemaphoreTakeRecursive calls below, because the pairing is
+// not obvious and getting it wrong deadlocks the display.
+//
+// The per-call take/give makes a single begin/end pair atomic. That alone is NOT
+// enough, because `locked` and `inTransaction` are shared members whose lifetime
+// spans MANY begin/end pairs: a batching caller sets inTransaction = true, and
+// every end_tft_write in between then skips ending the SPI transaction while
+// still releasing the mutex. A second task could walk in there, see locked ==
+// false, skip beginTransaction, and later call spi.endTransaction() for a
+// transaction the first task began — which trips
+// "assert failed: xTaskPriorityDisinherit" inside the SPI bus mutex, because the
+// task giving it is not the task that took it.
+//
+// So the SECOND take is tied to the SPI transaction itself: acquired when this
+// task actually begins one, released only when it actually ends one. The mutex
+// is therefore held for the transaction's whole lifetime, batched or not, and a
+// second task blocks at begin_tft_write instead of corrupting the pairing.
 inline void TFT_eSPI::begin_tft_write(void){
-  xSemaphoreTakeRecursive(tftMutex, portMAX_DELAY);
+  xSemaphoreTakeRecursive(tftMutex, portMAX_DELAY); // per-call
   if (locked) {
     locked = false; // Flag to show SPI access now unlocked
+    xSemaphoreTakeRecursive(tftMutex, portMAX_DELAY); // held for the transaction's lifetime
 #if defined (SPI_HAS_TRANSACTION) && defined (SUPPORT_TRANSACTIONS) && !defined(TFT_PARALLEL_8_BIT) && !defined(RP2040_PIO_INTERFACE)
     spi.beginTransaction(SPISettings(SPI_FREQUENCY, MSBFIRST, TFT_SPI_MODE));
 #endif
@@ -89,8 +107,10 @@ inline void TFT_eSPI::begin_tft_write(void){
 
 // Non-inlined version to permit override
 void TFT_eSPI::begin_nin_write(void){
+  xSemaphoreTakeRecursive(tftMutex, portMAX_DELAY); // per-call
   if (locked) {
     locked = false; // Flag to show SPI access now unlocked
+    xSemaphoreTakeRecursive(tftMutex, portMAX_DELAY); // held for the transaction's lifetime
 #if defined (SPI_HAS_TRANSACTION) && defined (SUPPORT_TRANSACTIONS) && !defined(TFT_PARALLEL_8_BIT) && !defined(RP2040_PIO_INTERFACE)
     spi.beginTransaction(SPISettings(SPI_FREQUENCY, MSBFIRST, TFT_SPI_MODE));
 #endif
@@ -113,9 +133,10 @@ inline void TFT_eSPI::end_tft_write(void){
 #if defined (SPI_HAS_TRANSACTION) && defined (SUPPORT_TRANSACTIONS) && !defined(TFT_PARALLEL_8_BIT) && !defined(RP2040_PIO_INTERFACE)
       spi.endTransaction();
 #endif
+      xSemaphoreGiveRecursive(tftMutex); // release the transaction-lifetime hold
     }
   }
-  xSemaphoreGiveRecursive(tftMutex);
+  xSemaphoreGiveRecursive(tftMutex); // per-call
 }
 
 // Non-inlined version to permit override
@@ -129,8 +150,10 @@ inline void TFT_eSPI::end_nin_write(void){
 #if defined (SPI_HAS_TRANSACTION) && defined (SUPPORT_TRANSACTIONS) && !defined(TFT_PARALLEL_8_BIT) && !defined(RP2040_PIO_INTERFACE)
       spi.endTransaction();
 #endif
+      xSemaphoreGiveRecursive(tftMutex); // release the transaction-lifetime hold
     }
   }
+  xSemaphoreGiveRecursive(tftMutex); // per-call
 }
 
 /***************************************************************************************
@@ -139,10 +162,12 @@ inline void TFT_eSPI::end_nin_write(void){
 ***************************************************************************************/
 // Reads require a lower SPI clock rate than writes
 inline void TFT_eSPI::begin_tft_read(void){
+  xSemaphoreTakeRecursive(tftMutex, portMAX_DELAY); // per-call
   DMA_BUSY_CHECK; // Wait for any DMA transfer to complete before changing SPI settings
 #if defined (SPI_HAS_TRANSACTION) && defined (SUPPORT_TRANSACTIONS) && !defined(TFT_PARALLEL_8_BIT) && !defined(RP2040_PIO_INTERFACE)
   if (locked) {
     locked = false;
+    xSemaphoreTakeRecursive(tftMutex, portMAX_DELAY); // held for the transaction's lifetime
     spi.beginTransaction(SPISettings(SPI_READ_FREQUENCY, MSBFIRST, TFT_SPI_MODE));
     CS_L;
   }
@@ -166,6 +191,7 @@ inline void TFT_eSPI::end_tft_read(void){
       locked = true;
       CS_H;
       spi.endTransaction();
+      xSemaphoreGiveRecursive(tftMutex); // release the transaction-lifetime hold
     }
   }
 #else
@@ -175,6 +201,7 @@ inline void TFT_eSPI::end_tft_read(void){
    if(!inTransaction) {CS_H;}
 #endif
   SET_BUS_WRITE_MODE;
+  xSemaphoreGiveRecursive(tftMutex); // per-call
 }
 
 /***************************************************************************************
