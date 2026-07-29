@@ -1079,7 +1079,25 @@ static void bleSpamApplyTxPower(BleSpamTxPower level) {
     esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, bleSpamTxPowerToLevel(level));
 }
 
-static void bleSpamSetMac(const uint8_t *mac) { esp_iface_mac_addr_set(mac, ESP_MAC_BT); }
+// The BT MAC is a global interface setting, not a per-module one. Nothing used to
+// put it back, so after any spam run every later advert — including the BLE API
+// control link the companion app connects to — went out under whichever random
+// address the last spam packet happened to use, and an app pinning a peer address
+// lost the device. Snapshot the factory address before the first override.
+static uint8_t bleSpamOriginalBtMac[6];
+static bool bleSpamOriginalBtMacSaved = false;
+
+static void bleSpamSetMac(const uint8_t *mac) {
+    if (!bleSpamOriginalBtMacSaved && esp_read_mac(bleSpamOriginalBtMac, ESP_MAC_BT) == ESP_OK) {
+        bleSpamOriginalBtMacSaved = true;
+    }
+    esp_iface_mac_addr_set(mac, ESP_MAC_BT);
+}
+
+static void bleSpamRestoreOriginalBtMac() {
+    if (!bleSpamOriginalBtMacSaved) return;
+    esp_iface_mac_addr_set(bleSpamOriginalBtMac, ESP_MAC_BT);
+}
 
 static uint64_t bleSpamMacRngState = 0;
 
@@ -1428,10 +1446,19 @@ static void bleSpamDeinitAdvertiser() {
     if (pAdvertising) {
         pAdvertising->stop();
         vTaskDelay(5 / portTICK_PERIOD_MS);
+        // BLEDevice::deinit() below defaults to clearAll=false, which leaves the
+        // NimBLEAdvertising singleton and its payload allocated. The next owner of
+        // the radio — bleApi.setup() — then adds the "Bruc" name and service UUID
+        // ON TOP of the spam's leftover bytes. Adverts are 31 bytes, so a 21-24 byte
+        // remnant (windows/samsung/ibeacon) overflows the budget and NimBLE drops
+        // the additions silently: the device comes back advertising anonymously and
+        // the app can no longer discover it by name.
+        pAdvertising->clearData();
         pAdvertising = nullptr;
     }
     // FIX: Always deinit - self-contained module
     BLEDevice::deinit();
+    bleSpamRestoreOriginalBtMac();
 #ifdef CONFIG_BT_NIMBLE_ENABLED
     // NimBLEDevice::m_ownAddrType is a static class member that survives
     // deinit()/init() cycles. bleSpamRestartAdvertiserForMac() flips it to
@@ -1451,7 +1478,7 @@ bleSpamRestartAdvertiserForMac(BleSpamRunState &state, const BleSpamConfig &conf
     if (pAdvertising) pAdvertising->stop();
 
     // Set the address at the hardware/interface level first — works for both stacks
-    esp_iface_mac_addr_set(mac, ESP_MAC_BT);
+    bleSpamSetMac(mac);
 
 #ifdef CONFIG_BT_NIMBLE_ENABLED
     // NimBLE keeps its own copy of the random address in the host layer.

