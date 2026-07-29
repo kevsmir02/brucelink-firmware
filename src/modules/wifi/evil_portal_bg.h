@@ -3,6 +3,8 @@
 
 #include <Arduino.h>
 
+#if !defined(LITE_VERSION)
+
 // A portal that does not hold the serial task. The blocking EvilPortal runs its
 // own while(true) from inside the CLI callback, so while it is up no BLE command
 // is parsed at all and, with the WebUI torn down on entry, the device has no
@@ -15,5 +17,7 @@ String evilPortalBgStatus();
 
 // Pumped from the serial command task; see the call site in serialcmds.cpp.
 void evilPortalBgTick();
+
+#endif // !defined(LITE_VERSION)
 
 #endif

@@ -4,6 +4,7 @@
 #include "core/wifi/ws_events.h"
 #include "modules/wifi/evil_portal.h"
 #include "modules/wifi/portal_cap.h"
+#include <WiFi.h>
 #include <globals.h>
 #include <new>
 
@@ -47,6 +48,12 @@ bool evilPortalBgStart(
         return false;
     }
 
+    // maxSeconds * 1000 must fit in uint32_t. The duration cap is the only recovery
+    // path left once the BLE API is off, so letting an absurd value wrap into a
+    // near-immediate stop would silently defeat the one safety net this feature has.
+    const uint32_t kMaxCapSeconds = 0xFFFFFFFFUL / 1000UL;
+    if (maxSeconds > kMaxCapSeconds) maxSeconds = kMaxCapSeconds;
+
     // The gateway default is applied by the caller in attack_commands.cpp, which
     // runs ahead of both the blocking and the background path. Do not repeat it.
 
@@ -59,6 +66,17 @@ bool evilPortalBgStart(
     if (!portal->isReady()) {
         delete portal;
         serialDevice->println("ERROR: portal setup failed, not on air. " + heapReport());
+        return false;
+    }
+
+    // isReady() alone cannot catch a failed AP here: setup()'s autoMode branch
+    // (evil_portal.cpp) returns true on every path, and beginAP() swallows a failed
+    // WiFi.softAP() into a Serial-only diagnostic that never reaches this board's
+    // console. A failed softAP() leaves no AP address, so probe that directly
+    // instead of trusting the constructor's own report of itself.
+    if (WiFi.softAPIP() == IPAddress((uint32_t)0)) {
+        delete portal;
+        serialDevice->println("ERROR: portal did not come up, softAP failed. " + heapReport());
         return false;
     }
 
