@@ -36,6 +36,7 @@ Verified end-to-end on hardware, safe to expose as a one-tap action.
 
 | Capability | Evidence |
 |---|---|
+| **Evil Portal (BLE off)** | Serves the page, answers Android `/generate_204` and iOS `/hotspot-detect.html`, captures credentials, returns them at `/creds`. Verified 2026-07-29. |
 | `blespam apple` | iPhone showed "Setup New iPhone". Company ID 76 captured. |
 | `blespam android` | 6 valid `0xFE2C` adverts captured. |
 | `blespam fastpair_regular` (and `_fun`/`_prank`/`_custom`) | **Fixed in `c9c43c03`**, confirmed at handset level 2026-07-29 — Android Fast Pair popup, with 16 valid `0xFE2C` adverts captured concurrently across five model IDs. |
@@ -61,7 +62,7 @@ Verified end-to-end on hardware, safe to expose as a one-tap action.
 | Capability | Failure | Entry |
 |---|---|---|
 | `deauth` | Crashes the device (SPI mutex, cross-task) | ISSUE-1 |
-| `evilportal` | Crashes **under load**, same assertion; and cannot serve its own page | ISSUE-1, ISSUE-21 |
+| `evilportal` | Crashes **under load** with BLE armed (ISSUE-1). **Serves correctly with `ble api off`** — full flow verified including credential capture (ISSUE-21 resolved). Stranding risk: needs on-device recovery |
 | `badusb` (USB HID) | Types nothing. No longer hangs — returns in 9.3 s (`b1c825c8`) | ISSUE-20 |
 | `badusb` (BLE HID) | **Not reachable** — no CLI path exists at all | ISSUE-20 |
 | Serial CLI over USB | **Does not exist on this board.** BLE is the only command interface | ISSUE-22 |
@@ -86,6 +87,7 @@ Verified end-to-end on hardware, safe to expose as a one-tap action.
 | No battery UI | `battery_pct` still permanently 1 (ISSUE-3 partial — the I²C storm is fixed, the reporting is not). |
 | Never gate on `capabilities` | Compile-time flags (ISSUE-4). |
 | `POST /login` writes flash every time | And can abort the device under load (ISSUE-18). |
+| HTTP `/cm` leaves the screen stale | No repaint on the queued path; reads as a crash (ISSUE-24). |
 
 ---
 
@@ -98,7 +100,7 @@ The honest gap. See §"Not tested, and why" in KNOWN_ISSUES.md for the full tabl
   *any* sustained drawing from the serial task, not `drawArc` specifically.
 - **`badusb` over BLE HID** — a different branch (`ducky_startKb(..., ble=true)`) that
   never touches TinyUSB, so ISSUE-20 may not apply. More useful than the USB path.
-- **Evil Portal credential capture** — blocked by ISSUE-21; there is no form to submit.
+
 - **`/upload`, `/edit`, `/rename`, WS `/ws`** — the write-side HTTP routes and the
   WebSocket. The read-side routes are all verified; these were not exercised.
 - **Evil Portal with `ble api off`** — never tried. ISSUE-21 may simply be the memory

@@ -1059,7 +1059,7 @@ remains **untested**.
 
 ### ISSUE-21 — Evil Portal cannot serve its own page on this board
 
-**Status:** OPEN · **Severity:** high (the attack is inert — no victim ever sees a
+**Status:** RESOLVED 2026-07-29 — it was the memory ceiling, not a portal defect · **Severity:** high (the attack is inert — no victim ever sees a
 form) · **Verified** 2026-07-29 · **Two clients, 7 failed fetches**
 
 The portal starts, advertises, and hands out DHCP leases, but does not serve a usable
@@ -1118,6 +1118,48 @@ off** — that is the obvious next experiment and may make it work as designed.
 Also observed and **unexplained**: the portal exited with nobody touching the device,
 contradicting the documented "no timeout, exits only via Esc → Exit Portal". Likely an
 allocation failure down some path, but that is a guess and is not recorded as fact.
+
+**RESOLVED 2026-07-29 — the portal was never broken.** Run with `ble api off`
+(121,247 free instead of 15,040) the entire flow works, end to end, on ELF
+`5186685c0fdf19c2`:
+
+| Request | Status | Size | Time |
+|---|---|---|---|
+| `GET /` | 200 | 4,726 B | 0.01 s — the "Sign in: Google Accounts" page |
+| `GET /generate_204` | 200 | 4,726 B | 0.24 s — Android captive-portal probe |
+| `GET /hotspot-detect.html` | 200 | 99 B | 0.01 s — iOS probe, redirects to the portal |
+| `GET`/`POST /post` | 200 | 2,357 B | 0.20 s — credential submission accepted |
+| `GET /creds` | 200 | 2,431 B | — **captured credentials returned** |
+
+**Credential capture verified**, which this register had listed as untested *and*
+blocked by this very entry:
+
+```
+email: testvictim@example.com
+password: NotARealPassword123
+```
+
+Details worth keeping: the form is `<form action='/post' id='login-form'>` with fields
+**`email`** and **`password`**, and it carries no `method=`, so a browser issues a GET
+— both GET and POST are accepted and both were captured. The retrieval endpoint
+defaults to **`/creds`** (`config.cpp:689`); `/BruceEvilCreds` is a filesystem path,
+not a route, and returns the portal page.
+
+**So this was never a routing or handler defect.** It is the same memory ceiling
+behind ISSUE-12 and ISSUE-16 — with the BLE API armed there is not enough heap to
+serve any HTTP body at all (contract §1).
+
+⚠️ **Operational cost, and it is severe.** `evilportal` calls
+`cleanlyStopWebUiForWiFiFeature()` on entry, destroying the WebUI and its AP. Dispatch
+it with BLE already off and there is **no remote control surface left at all** — no
+BLE, no WebUI, and no serial CLI exists (ISSUE-22). The portal serves no exit route
+(`/clear` only wipes captured passwords). Recovery is on-device only: Esc chord
+(LEFT+RIGHT) → "Exit Portal", then Config → BLE API toggle, because `ble api off`
+persisted `bleApiAutoStart = 0` and even a reboot comes back without BLE.
+
+**An app must not offer this combination unless the operator is at the device.** It
+becomes safe once `evilportal` gains a headless, remotely stoppable entry point
+(§5.3, still open).
 
 ---
 
@@ -1191,6 +1233,51 @@ absent authentication is.
 dump; or require pairing/bonding on the GATT service; or keep credentials out of the
 serialised config. Until then, **do not store real network credentials on this
 device**, and treat anything in `bruce.conf` as public to anyone within BLE range.
+
+---
+
+### ISSUE-24 — a verb dispatched over HTTP `/cm` never repaints the screen
+
+**Status:** OPEN · **Severity:** medium (reads as a crash to anyone watching) · **Verified** 2026-07-29
+
+`handleSerialCommands()` has two dispatch paths, and only one of them hands the
+display back. The queued `/cm` path parses and returns:
+
+```cpp
+if (xQueueReceive(cmdQueue, &packet, 0) == pdTRUE) {
+    bool result = serialCli.parse(String(packet.text));
+    xQueueSend(rspQueue, &result, 0);
+    ...                                   // returns — no backToMenu()
+}
+```
+
+while the `serialDevice` (BLE) path ends with:
+
+```cpp
+if (!cmd_trimmed.startsWith("nav") && !cmd_trimmed.startsWith("option")) { backToMenu(); }
+```
+
+So a verb sent over BLE repaints the menu afterwards and the same verb sent over HTTP
+does not — the screen keeps whatever frame the verb last drew
+(`serialcmds.cpp:41-54` versus `:71-77`).
+
+**Observed.** `evilportal` was dispatched over `POST /cm`, ran, and was exited on the
+device. The radio side confirmed it had fully stopped — no APs on air — while the
+display sat on **"Shutting down…"** indefinitely. The firmware was healthy throughout;
+only the frame was stale. Any button press repaints it.
+
+**This is a gap in `7c1c2ce7`, not a new defect.** That commit fixed exactly this
+symptom — its message even names *"Evil Portal appearing stuck on Shutting down…"* —
+but only for the path that reads from `serialDevice`. The HTTP queue path was missed.
+
+**Why it is worth fixing rather than filing as cosmetic:** it is indistinguishable
+from a crash to anyone looking at the device. During this session the operator sitting
+in front of the board, with full context, reached for the reset button. An app
+operator watching from across a room will read it as a hang every time — and any app
+driving this board over HTTP hits it on **every** command that draws.
+
+**Fix:** hoist the `backToMenu()` call so both dispatch paths share it, keeping the
+existing `nav`/`option` exemption. Roughly five lines.
 
 ---
 
