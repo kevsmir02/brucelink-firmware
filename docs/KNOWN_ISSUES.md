@@ -350,8 +350,10 @@ reading was monotonic, so the reset happened during that sweep and not since.
 **No USB console was being captured at the time**, so there is no backtrace and no
 reset reason. Two deliberate reproduction attempts with `/dev/ttyACM0` captured
 throughout — a five-verb sweep, and a FastPair run followed by a five-verb sweep —
-both ran clean, with `millis()` continuous and no `rst:0x` / `Backtrace:` /
-`assert failed` markers.
+both ran clean: `millis()` monotonic across every sample (150s->592s over 46 samples,
+431s->592s over 19) and no `rst:0x` / `Backtrace:` / `assert failed` / `ESP-ROM`
+markers in either capture. That is ~441 s of continuous uptime spanning both sweeps,
+against a fault that showed up inside ~300 s the one time it occurred.
 
 **Do not read this as fixed or as caused by `c9c43c03`; neither is established.** It
 is recorded because a one-off reset that is not understood is worth recognising if it
@@ -612,8 +614,8 @@ fastpair_regular   Bruc     present        1C:DB:D4:5E:D7:39 -> unchanged
 
 All six pass, where `samsung`, `windows` and `ibeacon` previously lost the name and
 every type previously leaked the MAC. Two full back-to-back sweeps were run with
-`/dev/ttyACM0` captured throughout: no panic, no reset, `millis()` continuous
-(150s->285s and 431s->592s), and heap returning to ~81,000 with the DMA block at
-31,732 after every single run.
+`/dev/ttyACM0` captured throughout: no panic, no reset, `millis()` monotonic across
+every sample in both captures (150s->592s over 46 samples, and 431s->592s over 19),
+and heap returning to ~81,000 with the DMA block at 31,732 after every single run.
 
 ---
