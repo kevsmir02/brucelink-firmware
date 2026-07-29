@@ -2,7 +2,14 @@
 
 Companion doc to [bruce-companion-api.md](./bruce-companion-api.md). That file is
 the **interface** — what the app can call. This one is the **rationale** — what was
-changed inside the firmware, why, and what it cost.
+changed inside the firmware, why, and what it cost. Verified defects live in
+[KNOWN_ISSUES.md](./KNOWN_ISSUES.md).
+
+> **The menu-dispatcher verbs added by this fork crash the device.** `deauth` panics
+> reproducibly with a FreeRTOS assert — the verbs draw to the TFT from the serialcmds
+> task while the main loop draws the same display, and the SPI bus mutex is released
+> by the wrong task. This is the single most significant thing found since the fork
+> was written up. See KNOWN_ISSUES §ISSUE-1.
 
 **Baseline:** upstream Bruce at `59e83bfb` (2026-07-23).
 **This fork's work starts at:** `373fb5d8` (2026-07-25).
@@ -10,7 +17,14 @@ changed inside the firmware, why, and what it cost.
 **Tested on:** Smoochiee V2 (ESP32‑S3‑N16R8 — 16 MB flash, 8 MB OPI PSRAM), env
 `smoochiee-board`. Nothing here has been run on any other board. See §7.
 
-Diff size: ~4,050 insertions / ~109 deletions across 44 files.
+Diff size: 4,050 insertions / 109 deletions across 44 files — `git diff --shortstat
+59e83bfb..623d4d26`, i.e. measured at the audit commit above. The same command
+against a later HEAD reports less, because `0b2073fa` deleted `docs/superpowers/`.
+Quote the endpoint with the number.
+
+Commit breakdown, `373fb5d8^..0b2073fa`: 51 commits — 19 `fix`, 17 `feat`, 7
+`tools`, 6 `docs`, 1 `test`, 1 `refactor`. 39 touch `src/` or `include/`; 12 are
+docs or tooling only.
 
 ---
 
@@ -104,6 +118,11 @@ still carries guards that only make sense if you know them:
    Current design. Freeing the BLE stack while it is still healthy releases ~62 KB
    and takes the largest contiguous DMA block from **1,332 bytes → 32,756 bytes**,
    so the memory guard passes on its first check and never touches Wi‑Fi.
+   Those two figures were measured 2026-07-27 with a station associated to the AP;
+   a re-measurement on 2026-07-29 with no station associated read 6,900 bytes
+   loaded and 31,732 bytes BLE-only. Both are far below and far above the 15 KB
+   guard respectively, so the design holds either way — but see the API contract
+   §7.1 before quoting a specific number.
 
 The insight that made it work: with the BLE API up, it is **the memory guard, not
 the attack**, that destroys the AP. Ordering is everything — attempt 1 rebuilt BLE
@@ -202,8 +221,23 @@ Not built, and not planned unless the app actually needs them:
   request a re-send. Buffering costs RAM this board does not have.
 - **Non-blocking menu-dispatcher verbs.** `karma`, `deauth`, `blesniffer`,
   `ap_info`, `reverseshell` and `pwngrid` still block the serial task until
-  someone presses a button on the device. Fixing this means running them in a
-  dedicated FreeRTOS task.
+  someone presses a button on the device.
+  **Superseded 2026-07-29 — this is no longer merely a limitation.** `deauth`
+  *crashes* the device (KNOWN_ISSUES §ISSUE-1): drawing the menu from the
+  serialcmds task while the main loop draws the same TFT releases the SPI bus
+  mutex from the wrong task and trips a FreeRTOS assert. Running them in a
+  dedicated FreeRTOS task, as suggested here, would **not** fix that — it adds a
+  third task to the same unarbitrated display. The fix is either to serialise all
+  TFT access behind one owner, or to give these verbs headless entry points that
+  never draw, the way `blespam` already works.
+- **A headless `evilportal`.** It belongs in the list above: the CLI verb builds a
+  stack-local `EvilPortal` with `backgroundMode=false`, so the constructor calls
+  `loop()`, whose only exit is ESC → "Exit Portal" on the device. There is no
+  duration check and no remote stop. A working headless path already exists —
+  Karma heap-allocates the portal with `backgroundMode=true` and pumps
+  `processRequests()` (`karma_attack.cpp:1786,1747`) — but the CLI verb does not
+  use it, and simply flipping the flag would destroy the stack temporary. See the
+  API contract §5.3.
 - **`deauth <target>` targeting.** The argument is accepted and discarded; the
   verb opens the on-device menu.
 - **Simultaneous BLE + Wi‑Fi as a steady state.** It works, but with ~15 KB free
@@ -217,9 +251,23 @@ Not built, and not planned unless the app actually needs them:
 - **`/cm` blocks on a depth‑2 queue.** While a blocking verb holds the serial
   task, all further `/cm` calls return HTTP 400.
 - **Blocking verbs emit no `state` frame**, so "is it done yet" has no clean
-  signal — the app has to probe.
-- **`has_pn532`, `has_fm`, `has_eth` in `/systeminfo` are hardcoded `false`**
-  regardless of hardware. Not yet wired to real `#define`s.
+  signal. They *do* emit a `COMMAND: <verb>` log frame before they start, because
+  it is pushed ahead of `parse()` — that is a usable dispatch ACK, but the
+  completion signal (`[CLI] Result:`) does not arrive until the verb exits. See
+  the API contract §4.1.
+- **`/systeminfo` capability flags do not describe the hardware.** They are
+  compile-time `#if defined(...)` checks against the board profile.
+  `has_pn532`/`has_fm`/`has_eth` are hardcoded `false`; the rest report whatever
+  `boards/smoochiee-board/pins_arduino.h` declares. On a bare ESP32‑S3‑N16R8 with
+  only an LCD and buttons, `/systeminfo` claims CC1101, NRF24, GPS, IR, buzzer,
+  RGB LED and mic while `i2c` on the same device returns `No I2C devices found`
+  (measured 2026-07-29). Runtime probing is not implemented.
+- **`battery_pct` and `charging` are wrong with no PMU fitted.** `getBattery()`
+  and `isCharging()` call `PPM.*` regardless of whether `PPM.init()` succeeded
+  (`boards/smoochiee-board/interface.cpp:38-75`). On a board with no BQ25896 they
+  report a permanent `battery_pct: 1` / `charging: true` and the failing polls
+  emit a continuous `ESP_ERR_INVALID_STATE` stream on the console — roughly 10
+  per 22 s, measured 2026-07-29.
 - **iOS visibility unconfirmed.** `Bruc` is visible in BLE scans from a PC; an
   iPhone 8 did not see it, likely iOS BLE privacy filtering. Untested on other
   iOS devices.
