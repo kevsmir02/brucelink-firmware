@@ -32,6 +32,10 @@ public:
     void processRequests(void);
     void shutdown(void);
     bool isReady() { return _ready; }
+    // softAPIP() cannot stand in for this: beginAP() calls softAPConfig() first,
+    // which starts the netif and writes the address, so the IP reads back even
+    // when the softAP() that follows fails.
+    bool apOnAir() { return _apOnAir; }
     int getCredentialCount() { return totalCapturedCredentials; }
 
     bool hasCredentials();
@@ -84,6 +88,7 @@ private:
     bool verifyPass = false;
     bool _pendingWifiRestart = false;
     bool _ready = false;
+    bool _apOnAir = false;
 
     CaptiveRequestHandler *_captiveHandler = nullptr;
 

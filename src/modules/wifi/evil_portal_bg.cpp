@@ -4,7 +4,6 @@
 #include "core/wifi/ws_events.h"
 #include "modules/wifi/evil_portal.h"
 #include "modules/wifi/portal_cap.h"
-#include <WiFi.h>
 #include <globals.h>
 #include <new>
 
@@ -73,13 +72,15 @@ bool evilPortalBgStart(
     // isReady() alone cannot catch a failed AP here: setup()'s autoMode branch
     // (evil_portal.cpp) returns true on every path, and beginAP() swallows a failed
     // WiFi.softAP() into a Serial-only diagnostic that never reaches this board's
-    // console. A failed softAP() leaves no AP address, so probe that directly
-    // instead of trusting the constructor's own report of itself.
-    if (WiFi.softAPIP() == IPAddress((uint32_t)0)) {
+    // console. apOnAir() carries that discarded return value out instead.
+    if (!portal->apOnAir()) {
         // beginAP() starts the DNS server and switches radio mode before it can know
         // whether softAP() worked, so even a failed start has real state to tear
         // down: dnsServer is a borrowed singleton delete never stops, and the radio
-        // mode change outlives the object unless shutdown() explicitly reverts it.
+        // is left in AP mode. shutdown() does not restore the previous mode despite
+        // appearances — its WiFi.mode(_originalWifiMode) is immediately undone by
+        // wifiDisconnect(), which forces WIFI_OFF (wifi_common.cpp:159). Off is still
+        // the right outcome here; it is just not a restore.
         portal->shutdown();
         delete portal;
         serialDevice->println("ERROR: portal did not come up, softAP failed. " + heapReport());

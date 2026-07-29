@@ -62,9 +62,33 @@ uint32_t evilportalCmdCallback(cmd *c) {
     if (cmd.getArgument("bg").isSet()) {
         String durStr = cmd.getArgument("duration").getValue();
         durStr.trim();
-        long duration = durStr.toInt();
-        if (duration < 0) duration = 0;
-        return evilPortalBgStart(ssid, channel, templateFile, (uint32_t)duration);
+        // Only an explicit run of digits may reach the cap, because 0 means
+        // "unlimited" and toInt() also answers 0 for "-5" and for "abc". Mapping a
+        // malformed duration onto the uncapped case would disarm the one recovery
+        // path that survives `ble api off`.
+        bool numeric = !durStr.isEmpty();
+        for (unsigned i = 0; i < durStr.length(); i++) {
+            if (!isdigit((unsigned char)durStr[i])) numeric = false;
+        }
+        if (!numeric) {
+            serialDevice->println(
+                "ERROR: -duration must be a whole number of seconds (0 = unlimited), got '" +
+                durStr + "'"
+            );
+            return false;
+        }
+        return evilPortalBgStart(ssid, channel, templateFile, (uint32_t)durStr.toInt());
+    }
+
+    // The blocking portal holds the serial task, which is what pumps the background
+    // one — so starting it here would freeze the background portal's duration cap
+    // and then tear down its AP through the shared DNS server and wifiDisconnect().
+    if (evilPortalBgRunning()) {
+        serialDevice->println(
+            "ERROR: a background portal is already running. Stop it with "
+            "'evilportal -off' before starting the blocking portal."
+        );
+        return false;
     }
 
     setDeviceState("portal");

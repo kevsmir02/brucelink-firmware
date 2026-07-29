@@ -137,7 +137,8 @@ void EvilPortal::beginAP() {
     if (!WiFi.softAPConfig(apGateway, apGateway, IPAddress(255, 255, 255, 0))) {
         Serial.println("[PORTAL] softAPConfig failed");
     }
-    if (!WiFi.softAP(apName, emptyString, _channel)) {
+    _apOnAir = WiFi.softAP(apName, emptyString, _channel);
+    if (!_apOnAir) {
         Serial.printf("[PORTAL] softAP failed for SSID '%s' on ch%d\n", apName.c_str(), _channel);
     }
     wifiConnected = true;
