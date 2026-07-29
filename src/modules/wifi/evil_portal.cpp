@@ -28,6 +28,10 @@ EvilPortal::EvilPortal(
     if (!setup()) return;
     cleanlyStopWebUiForWiFiFeature();
     beginAP();
+    // setup() failing returns early above with no outward signal, so a background
+    // caller holding this pointer cannot otherwise tell a live portal from a dead
+    // object that never reached beginAP().
+    _ready = true;
     if (!_backgroundMode) { loop(); }
 }
 
@@ -346,19 +350,7 @@ void EvilPortal::loop() {
             if (exitPortal) {
                 displayTextLine("Shutting down...");
                 vTaskDelay(100 / portTICK_PERIOD_MS);
-
-                webServer.end();
-                vTaskDelay(200 / portTICK_PERIOD_MS);
-
-                dnsServer->stop();
-                vTaskDelay(100 / portTICK_PERIOD_MS);
-
-                WiFi.mode(_originalWifiMode);
-                vTaskDelay(100 / portTICK_PERIOD_MS);
-
-                wifiDisconnect();
-                vTaskDelay(100 / portTICK_PERIOD_MS);
-
+                shutdown();
                 return;
             }
             shouldRedraw = true;
@@ -369,6 +361,24 @@ void EvilPortal::loop() {
             verifyPass = false;
         }
     }
+}
+
+// The delays space out the teardown of four subsystems that share the WiFi
+// stack; collapsing them has not been tested. Draws nothing, because the
+// background path runs this from the serial task and sustained drawing from
+// there is the ISSUE-1 crash trigger.
+void EvilPortal::shutdown(void) {
+    webServer.end();
+    vTaskDelay(200 / portTICK_PERIOD_MS);
+
+    dnsServer->stop();
+    vTaskDelay(100 / portTICK_PERIOD_MS);
+
+    WiFi.mode(_originalWifiMode);
+    vTaskDelay(100 / portTICK_PERIOD_MS);
+
+    wifiDisconnect();
+    vTaskDelay(100 / portTICK_PERIOD_MS);
 }
 
 void EvilPortal::processRequests() {

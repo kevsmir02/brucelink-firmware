@@ -30,6 +30,9 @@ public:
     void setupRoutes(void);
     void loop(void);
     void processRequests(void);
+    void shutdown(void);
+    bool isReady() { return _ready; }
+    int getCredentialCount() { return totalCapturedCredentials; }
 
     bool hasCredentials();
     String getCapturedSSID();
@@ -80,6 +83,7 @@ private:
     String capturedCredentialsHtml = "";
     bool verifyPass = false;
     bool _pendingWifiRestart = false;
+    bool _ready = false;
 
     CaptiveRequestHandler *_captiveHandler = nullptr;
 
