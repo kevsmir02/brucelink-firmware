@@ -64,6 +64,7 @@ bool evilPortalBgStart(
         return false;
     }
     if (!portal->isReady()) {
+        portal->shutdown();
         delete portal;
         serialDevice->println("ERROR: portal setup failed, not on air. " + heapReport());
         return false;
@@ -75,6 +76,11 @@ bool evilPortalBgStart(
     // console. A failed softAP() leaves no AP address, so probe that directly
     // instead of trusting the constructor's own report of itself.
     if (WiFi.softAPIP() == IPAddress((uint32_t)0)) {
+        // beginAP() starts the DNS server and switches radio mode before it can know
+        // whether softAP() worked, so even a failed start has real state to tear
+        // down: dnsServer is a borrowed singleton delete never stops, and the radio
+        // mode change outlives the object unless shutdown() explicitly reverts it.
+        portal->shutdown();
         delete portal;
         serialDevice->println("ERROR: portal did not come up, softAP failed. " + heapReport());
         return false;
