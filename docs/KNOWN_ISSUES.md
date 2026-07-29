@@ -822,6 +822,86 @@ the device — not to offer a cancel button that cannot work.
 
 ---
 
+### ISSUE-20 — `badusb` cannot work on this build and hangs the device forever
+
+**Status:** OPEN · **Severity:** critical (unrecoverable hang; and it retires a
+capability previously believed shippable) · **Verified** 2026-07-29 ·
+**Root cause fully code-verified**
+
+`badusb run_from_file` types **nothing** and **never returns**. The serial task is
+held indefinitely — no reply to the verb after 45 s, none to a follow-up `uptime`, and
+no error on any channel. Only a physical reset recovers it.
+
+**Observed** (user watching a focused text editor, 2026-07-29): payload
+`DELAY 3000` + `STRING BRUCELINK_BADUSB_OK_20260729`, written to `/bl_ducky.txt` and
+verified by `cat`. Nothing was typed. BLE remained connectable throughout, so the
+device was alive — only the CLI task was stuck.
+
+**Root cause — TinyUSB is not the active USB stack on this board.**
+
+```cpp
+// ducky_typer.cpp, ducky_startKb(), the #if defined(USB_as_HID) branch
+hid = new USBHIDKeyboard();
+USB.begin();
+while (!tud_mounted()) {                  // <- unbounded, no timeout, no escape
+    printStatusBadUSBBLE("Waiting USB Host...");
+    delay(500);
+}
+```
+
+`tud_mounted()` can never become true here, because the board is compiled for the
+hardware USB Serial/JTAG peripheral rather than TinyUSB:
+
+```
+boards/_boards_json/smoochiee-board.json → build.extra_flags:
+  -DARDUINO_USB_CDC_ON_BOOT  -DARDUINO_USB_MODE=1
+```
+
+and the framework gates the two stacks against exactly that flag:
+
+| Framework source | Meaning |
+|---|---|
+| `HardwareSerial.h:440` | `#if ARDUINO_USB_MODE` → *Hardware CDC mode*; `#else` → *Native USB Mode* |
+| `main.cpp:6` | TinyUSB is initialised only `#if (…ON_BOOT) && !ARDUINO_USB_MODE` |
+| `HWCDC.h:109` | `ARDUINO_USB_MODE && ARDUINO_USB_CDC_ON_BOOT` → *Hardware JTAG CDC selected* |
+
+So `ARDUINO_USB_MODE=1` selects hardware JTAG CDC and leaves TinyUSB uninitialised,
+while `USB_as_HID` is defined regardless (`boards/smoochiee-board/pins_arduino.h:25`)
+— so the HID branch is compiled in and then waits forever for a stack that was never
+started.
+
+**This is the compile-time-flag trap biting for real.** `USB_as_HID` being defined is
+what made BadUSB look like the one attack class needing no extra hardware. It is the
+same class of error as the `/systeminfo` capability flags (ISSUE-4), except here the
+consequence is a hang rather than a wrong label.
+
+**Corrects an earlier claim.** Prior notes recorded BadUSB as "fitted hardware,
+registered and unexposed by the app", and the readiness brief listed
+`badusb run_from_file` / `run_from_buffer` as shippable and needing no extra hardware.
+**That is false on this build.** Being `#define`d is not being usable.
+
+**Both entry points are affected.** `badusbBufferCallback` reaches the same
+`ducky_startKb(hid_usb, false)`, so `run_from_buffer` hangs identically. The BLE-HID
+path (`ducky_startKb(..., ble=true)`) is a **different** branch that does not touch
+TinyUSB — it builds a `BleKeyboard` — and was **not tested**. It may well work, and is
+the more interesting option anyway since it needs no cable to the target.
+
+**Fix directions (none implemented), in increasing order of cost:**
+
+1. **Bound the wait.** `while (!tud_mounted())` should time out and report, instead of
+   hanging the only command surface the app has. This is worth doing regardless of
+   which USB mode the board ships, since it converts an unrecoverable hang into an
+   error the app can render.
+2. **Refuse early.** Gate the USB branch on the USB mode actually compiled
+   (`#if ARDUINO_USB_MODE == 1` → return a clear "USB HID unavailable in hardware-CDC
+   mode" rather than attempting it).
+3. **Build with `ARDUINO_USB_MODE=0`** to get real TinyUSB HID. **This has a real
+   cost**: the hardware JTAG CDC console is how panic backtraces are captured on this
+   board (see ISSUE-1's decode), so changing it affects the primary debugging channel.
+   Not a change to make casually.
+
+---
+
 ## Not tested, and why
 
 Recorded so the gap is visible rather than implied. Session of 2026-07-29, unattended.
@@ -832,7 +912,9 @@ Recorded so the gap is visible rather than implied. Session of 2026-07-29, unatt
 | Minimum pulse count for the `nav` rescue | 1 failed, 6 succeeded, with other attempts in between; the exact threshold was not bisected. Would need a fresh block per trial. |
 | Whether `pwngrid` is rescuable | It is the only other blocking verb that appears to touch neither radio, so it should be, but it was not tested. |
 | `/getscreen`, `/listfiles`, `/file`, `/upload`, `/edit`, `/rename`, WS `/ws` | Same blocker. `GET /` (200) and `GET /systeminfo` (401 unauth) are the only routes exercised. |
-| `badusb run_from_file` / `run_from_buffer`, BLE HID variant | **Deliberately skipped.** It emits real USB HID keystrokes into the attached host — here, the laptop running the test session, whose focused window is a terminal. Unsafe unattended; needs an attended session with a scratch window focused. Note `print`/`println` in JS are the *badusb* natives (`mqjs_stdlib.h`), so JS payloads carry the same hazard. |
+| ~~`badusb run_from_file`~~ | **DONE 2026-07-29, attended** — types nothing and hangs the device forever. See ISSUE-20. |
+| `badusb` **BLE HID** variant (`ducky_startKb(..., ble=true)`) | Not tested. It is a different branch that builds a `BleKeyboard` and never touches TinyUSB, so ISSUE-20 does **not** necessarily apply to it. More useful than the USB path anyway — no cable to the target. |
+| JS `print`/`println` | Untested and hazardous for the same reason as `badusb`: they are the badusb HID natives (`mqjs_stdlib.h`), not console output. |
 | `wifi add` / `wifi on` / `wifi off` | The user chose the AP path for this session, which does not exercise them. Zero evidence either way. |
 | ~~FastPair **handset** popup after `c9c43c03`~~ | **DONE 2026-07-29** — Android popup confirmed by the user, with 16 valid `0xFE2C` adverts captured concurrently. See §Resolved ISSUE-8. |
 | Evil Portal capturing a real credential, and under load | Needs a phone associating and typing. Still only ever run idle (ISSUE-1 predicts load is the real crash risk). |
