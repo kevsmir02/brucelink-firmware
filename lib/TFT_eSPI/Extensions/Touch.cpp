@@ -20,11 +20,23 @@
 ** Description:             Start transaction and select touch controller
 ***************************************************************************************/
 // The touch controller has a low SPI clock rate
+//
+// This is the fourth begin/end pair driving the shared `locked` flag and the one
+// SPI transaction, so it takes the same two-level hold as the three in
+// TFT_eSPI.cpp — see the note above begin_tft_write for why the per-call take is
+// not enough on its own. Without the transaction-lifetime give below, a touch
+// read that landed mid-batch would set locked = true and strand the hold, and
+// every other task would block at begin_tft_write forever.
 inline void TFT_eSPI::begin_touch_read_write(void){
+  xSemaphoreTakeRecursive(tftMutex, portMAX_DELAY); // per-call
   DMA_BUSY_CHECK;
   CS_H; // Just in case it has been left low
   #if defined (SPI_HAS_TRANSACTION) && defined (SUPPORT_TRANSACTIONS)
-    if (locked) {locked = false; spi.beginTransaction(SPISettings(SPI_TOUCH_FREQUENCY, MSBFIRST, SPI_MODE0));}
+    if (locked) {
+      locked = false;
+      xSemaphoreTakeRecursive(tftMutex, portMAX_DELAY); // held for the transaction's lifetime
+      spi.beginTransaction(SPISettings(SPI_TOUCH_FREQUENCY, MSBFIRST, SPI_MODE0));
+    }
   #else
     spi.setFrequency(SPI_TOUCH_FREQUENCY);
   #endif
@@ -39,11 +51,18 @@ inline void TFT_eSPI::begin_touch_read_write(void){
 inline void TFT_eSPI::end_touch_read_write(void){
   T_CS_H;
   #if defined (SPI_HAS_TRANSACTION) && defined (SUPPORT_TRANSACTIONS)
-    if(!inTransaction) {if (!locked) {locked = true; spi.endTransaction();}}
+    if(!inTransaction) {
+      if (!locked) {
+        locked = true;
+        spi.endTransaction();
+        xSemaphoreGiveRecursive(tftMutex); // release the transaction-lifetime hold
+      }
+    }
   #else
     spi.setFrequency(SPI_FREQUENCY);
   #endif
   //SET_BUS_WRITE_MODE;
+  xSemaphoreGiveRecursive(tftMutex); // per-call
 }
 
 /***************************************************************************************
