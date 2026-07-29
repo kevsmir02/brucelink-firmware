@@ -208,6 +208,19 @@ condition through a different verb. Neither run produced an `assert failed`,
 The `evilportal`-under-load case remains unconfirmed for an unrelated reason: that run
 starved itself to 163 bytes and exited before the drawing could collide (ISSUE-21).
 
+**Retired for the HEADLESS portal path only — 2026-07-30, ELF `76d42c72f2b4a8a4`.**
+`evilportal -bg` was run under load with a client associated and pages being fetched,
+and the assertion **did not reproduce**: no `xTaskPriorityDisinherit`, no SPI mutex
+failure, no `Backtrace:`. That is the expected result rather than a lucky one — the
+background path deliberately draws nothing from the serial task, which removes the
+precondition entirely. It died of memory instead (ISSUE-25).
+
+**The blocking `evilportal` verb is unchanged and still carries this defect.** It still
+runs `EvilPortal::loop()` → `drawScreen()` on the serial task, which is the exact stack
+in the backtrace above. Nothing in the headless work touched it. The same holds for
+`deauth`, `karma`, `blesniffer`, `ap_info` and `pwngrid`, none of which gained a
+headless entry point.
+
 ---
 
 ### ISSUE-2 — `settings` with no arguments returns nothing over BLE
@@ -523,6 +536,59 @@ working ("Simultaneous BLE + AP + WebUI … free heap 14,951"), which the fresh-
 retest then confirmed at 14,140. Recorded rather than deleted because the failing case
 is real and the trap — testing from a dirty baseline — is easy to repeat.
 
+**The margin is far tighter than "~18 KB" — it is decided by under 1 KB.** Measured
+2026-07-30 on ELF `76d42c72f2b4a8a4`: three *fresh boots*, the same `webui -bg`, and
+the outcome flipped twice. **Neither of the first two logged an AsyncTCP error**, so
+both looked like the "working" profile above at the RAMLOG level:
+
+| stage | run 1 — **worked** | run 2 — **failed** | run 3 — **worked** |
+|---|---|---|---|
+| `first-mainMenu` | 81,103 / dma 31,732 | 81,103 / dma 31,732 | 81,243 / dma 31,732 |
+| `webui pre-alloc` | 28,467 / 19,444 | 27,639 / 18,420 | — |
+| `after MDNS` | 22,567 / 14,324 | 21,988 / 13,812 | — |
+| `webui pre-ws` | 20,103 / 12,276 | 19,523 / 11,252 | 20,231 / 12,276 |
+| `webui post-begin` | 14,887 / **dma 6,644** | 14,307 / **dma 6,132** | 15,015 / **dma 6,900** |
+| `POST /login` | 302 + cookie, sub-second | **http=000 ×4** (14.3 s, 3.1 s, 2.0 s, 35 s) | 302 + cookie, 1.33 s |
+
+The deciding margin between run 1 and run 2 was **~580 bytes**. The one behavioural
+difference: run 1 started the WebUI at `t=38,550 ms` after little navigation, run 2 at
+`t=191,370 ms` after the operator had moved around the UI, run 3 at `t=20,327 ms` with
+none at all — and run 3 had the largest DMA block of the three.
+
+**Operational rule that follows: issue `webui -bg` as soon after boot as possible, and
+do not navigate menus first.** This is ISSUE-17's principle at a much finer grain than
+that entry's ~18 KB.
+
+**`dma largest` at `webui post-begin` predicts the outcome better than free heap does**
+— 6,900 and 6,644 served, 6,132 did not, while free heap differed by well under 5%
+across all three. **SUSPECTED, not verified**: this rests on one set of three runs and
+no threshold has been bisected.
+
+**In the failing state the device is one allocation from the BT-controller abort.**
+Run 2 logged `E (309086) BLE_INIT: Malloc failed` twice on the console, BLE replies
+collapsed to 3 and 1 bytes (ISSUE-16), and `free` after recovery reported
+**`minEver=776`**. See ISSUE-25 — that is the same condition which aborts the device
+when the log call itself cannot allocate.
+
+**Recovery that works, in this order:** drop the station first (`nmcli con down`), then
+`webui -off` over BLE. Heap went 14,307 → 57,435 / dma 19,444. The `webui -off`
+executes even while replies are coming back empty.
+
+**Association vs. DHCP — the failures are at different layers, and this entry
+previously conflated them.** On 2026-07-29 NetworkManager reported *"The Wi-Fi network
+could not be found"*, which reads as an association failure. On 2026-07-30, with
+`ipv4.method auto`, it reported instead **"IP configuration could not be reserved"** —
+association had *succeeded* and only DHCP failed. Setting a **static address**
+(`ipv4.method manual`, `172.0.0.5/24`, no gateway) associated immediately and reached
+the device: ICMP 3/3, TCP 80 accepted, HTTP served. Heap after the failed DHCP attempt:
+free 14,771, `minEver` 8,415, dma largest 6,644 → 4,596.
+
+⚠️ **The documented remedy was not tried.** §Test harness in `TEST_STATUS.md` already
+records `nmcli connection modify <profile> ipv4.dad-timeout 0` for exactly this
+symptom, attributing it to ARP duplicate-address detection hanging because the ESP32
+does not answer ARP probes. That is a better fix than a static address and it was
+missed on the day. **Try `ipv4.dad-timeout 0` before reaching for a static IP.**
+
 ---
 
 ### ISSUE-13 — `encrypt` then `decrypt` fails ~62% of the time, silently
@@ -735,6 +801,31 @@ The commands still executed: `webui -off` issued in that state returned
 could not build an answer", not "the device did not act".** An app must not retry on
 an empty reply — the side effect has already happened.
 
+**Reproduced again 2026-07-30** on ELF `76d42c72f2b4a8a4`, and the "still executed"
+property held a second time. In the ISSUE-12 run-2 failing state, `free` returned
+**3 bytes** and `uptime` returned **1 byte**, both with `eot=True` and **no**
+`[TRUNCATED: device low on memory]` marker. `webui -off` issued in that same state
+returned a full 18-byte `WebUI stopped` and recovered heap to 57,435 / dma 19,444.
+Low-water marks measured on the two runs: **`minEver=776`** and **`minEver=1,211`**.
+
+**Sharper isolation — the listener is alive; it is the response body that cannot be
+built.** "HTTP does not work with the BLE API armed" is too coarse. Measured with BLE
+armed, AP up and the WebUI running (free 14,771 / dma largest 4,596):
+
+| Probe | Result |
+|---|---|
+| ICMP to `172.0.0.1` | 3/3, 0% loss |
+| TCP connect to port 80 | **accepted** — SYN/ACK completes |
+| `GET /` (a real page body) | connects, sends the request, **0 bytes received** at both 10 s and 20 s |
+| `POST /login` (302, no body) | full response, sub-second |
+| `POST /cm` (21-byte body) | `command uptime queued`, sub-second |
+
+So AsyncTCP is listening and small replies are fine; the failure is specific to
+allocating a real response body. This matches the portal result in ISSUE-21 — small
+routes 200, the 4,726-byte page stalled — and means an app that probes reachability
+with a small request will conclude the transport is healthy when it cannot serve
+anything useful.
+
 ---
 
 ### ISSUE-17 — the JS interpreter permanently retains ~18 KB of internal heap
@@ -870,6 +961,14 @@ on the hardware above, 2026-07-29, over the BLE CLI characteristic unless stated
 | HTTP survives a non-radio blocking verb | With `ap_info` holding the serial task, `POST /cm cmnd=uptime` still returned `command uptime queued` / 200. The AsyncWebServer task is genuinely independent of the CLI queue. |
 | `POST /cm` auth + queueing | Cookie auth accepted; returns `command <verb> queued` and never the output, as documented. |
 | Menu exit paths | `loopOptions` breaks on `check(EscPress)` for non-main menus (`display.cpp:647`); `addOptionToMainMenu()` also pushes a `Main Menu` option calling `backToMenu()` (`utils.cpp:27-30`). Either works. |
+| **Headless portal is genuinely headless** | `uptime` over BLE answered in **0.06 s** during a live background portal, where the blocking verb held the serial task for its entire life. `evilportal -status` answered 9 consecutive times during a running portal. ELF `76d42c72f2b4a8a4`, 2026-07-30. |
+| Portal duration cap self-stops | 45 s cap fired at **+45.6 s**; events in order `portal duration cap reached` → `state:idle` → `portal stopped`. This is the only recovery path that survives `ble api off`. |
+| Cap path writes nothing to the CLI | **Zero** unsolicited bytes on the CLI characteristic across a full cap firing; `uptime` immediately after returned a clean `Uptime: 00:01:35`. Confirms `stopPortal(announceOnCli=false)` does not touch `serialDevice` — the design's central framing claim. |
+| AP genuinely on air, independently checked | `nmcli` scan showed `PortalTest`, ch 6, signal 90, open — not taken from the device's own reply. Laptop associated and got `172.0.0.2/24`. |
+| BLE + AP + WebUI + HTTP **do** coexist | 2026-07-30: with the BLE API armed, `POST /login` returned 302 + cookie in 1.33 s and `POST /cm` returned `command uptime queued`, while BLE `uptime` kept answering. Small responses only — see ISSUE-16 for what does not work. |
+| `nav` is handled before queueing | Reply is `command nav esc success`, distinct from `command <verb> queued` — so the AsyncWebServer task writes the button globals directly and never reaches the serial queue (`webInterface.cpp:537-552`). Previously a code-only claim. |
+| Reset-cause calibration | RST button → `rst:0x1 (POWERON)`; software `reboot` verb → `rst:0xc (RTC_SW_CPU_RST)`. Distinguishable in any console capture, which is how an operator reset was told apart from a firmware fault. 2026-07-30. |
+| `POST /login` form fields | `username` / `password` (`webInterface.cpp:425-426`). Posting `user`/`pwd` returns `302 Location: /?failed` — **indistinguishable from a wrong password**. |
 
 ---
 
@@ -1161,6 +1260,35 @@ persisted `bleApiAutoStart = 0` and even a reboot comes back without BLE.
 becomes safe once `evilportal` gains a headless, remotely stoppable entry point
 (§5.3, still open).
 
+**UPDATE 2026-07-30 — the headless entry point now exists, and the starvation
+reproduced with numbers attached.** `evilportal -bg` shipped on this branch (see
+`FIRMWARE_CHANGES.md`), and the load-bearing claim was proven on hardware: `uptime`
+over BLE answered in **0.06 s** during a live portal, where the blocking verb had
+previously held the serial task for its entire life. `evilportal -status` answered 9
+consecutive times during a running portal.
+
+**But the memory ceiling in this entry is still there, and it still prevents credential
+capture with the BLE API armed.** Measured on ELF `76d42c72f2b4a8a4`:
+
+| | with BLE armed | idle reference |
+|---|---|---|
+| free heap at portal start | **16,915** | 80,951 |
+| dma largest at portal start | **8,180** | 31,732 |
+
+`GET /` delivered **2,766 of the expected 4,726 bytes and then stalled** until timeout.
+The `email` and `password` inputs live in the last ~600 bytes and never arrived — which
+reproduces this entry's original symptom exactly, from the opposite direction. Small
+routes were unaffected: `/hotspot-detect.html` returned 200/99 B in 0.005 s and
+`/generate_204` returned 302. After the large request every route went to `http=000`.
+
+So the resolution above stands — the portal is not broken — but **the configuration in
+which it works is still `ble api off` and nothing has changed that.** The headless verb
+removes the *stranding* risk (the duration cap self-stops the portal, verified at
++45.6 s on a 45 s cap) without removing the *memory* constraint.
+
+**Credential capture with `ble api off` remains the only proven-working configuration,
+and it has not been re-run since the headless work landed.**
+
 ---
 
 ### ISSUE-22 — there is no serial CLI on this board; BLE is the only command interface
@@ -1238,7 +1366,8 @@ device**, and treat anything in `bruce.conf` as public to anyone within BLE rang
 
 ### ISSUE-24 — a verb dispatched over HTTP `/cm` never repaints the screen
 
-**Status:** OPEN · **Severity:** medium (reads as a crash to anyone watching) · **Verified** 2026-07-29
+**Status:** OPEN — fix landed in `d71f19e9`, **hardware verification still UNRUN** ·
+**Severity:** medium (reads as a crash to anyone watching) · **Verified** 2026-07-29
 
 `handleSerialCommands()` has two dispatch paths, and only one of them hands the
 display back. The queued `/cm` path parses and returns:
@@ -1279,6 +1408,355 @@ driving this board over HTTP hits it on **every** command that draws.
 **Fix:** hoist the `backToMenu()` call so both dispatch paths share it, keeping the
 existing `nav`/`option` exemption. Roughly five lines.
 
+**Fix applied in `d71f19e9`.** `redrawUnlessNavigation()` (`serialcmds.cpp:41-48`) is
+now called from both dispatch paths — the HTTP queue path at `:71` and the
+`serialDevice` path at `:90` — keeping the `nav`/`option` exemption. It is
+verb-agnostic.
+
+**⚠️ NOT YET VERIFIED ON HARDWARE.** Three attempts were made 2026-07-30 and none
+produced a valid observation. Recorded in full because two of the three failures are
+themselves findings:
+
+| Attempt | Outcome |
+|---|---|
+| 1 | **Invalid.** The operator pressed RST at 00:34:19; the dispatch went out at 00:34:43, 24 s after the AP had already gone. Console shows `rst:0x1 (POWERON)` and **no** crash markers. |
+| 2 | **Blocked.** `POST /login` could not complete — the ISSUE-12 failing case, see the variance table in that entry. |
+| 3 | **Invalid, and badly designed.** The device was parked in the **Config submenu**, which is precisely where the repaint cannot work — see the limitation below. The main loop then wedged (ISSUE-30). |
+
+**The fix is narrower than it looks — `backToMenu()` only takes effect on the main
+menu.** `backToMenu()` is a single flag set, `returnToMenu = true` (`utils.cpp:26`);
+it draws nothing. The flag is consumed, and the repaint performed, inside
+`loopOptions()` — but only under `if (menuType == MENU_TYPE_MAIN)`
+(`display.cpp:568`, consumption at `:584-588`). Every other menu level checks
+`returnToMenu` only *after* its own `loopOptions()` returns, which requires a button
+press (e.g. `ConfigMenu.cpp:18-24`).
+
+So a `/cm`-dispatched verb repaints the screen **only if the main loop happened to be
+sitting on the main menu**. If the operator has navigated into any submenu, the
+request is set and silently dropped until they press something — which is the same
+class of symptom the fix was written to remove. This is not a defect in `d71f19e9`,
+which does what it says; it is a limit on how much that mechanism can achieve, and it
+was not understood when the fix was written.
+
+**What a valid test requires**, established the hard way:
+
+- The device must be on the **main menu**, not a submenu.
+- The verb must actually **draw**, or there is nothing to repaint over.
+- The verb must not set `returnToMenu` itself, or the test passes regardless of the
+  fix and proves nothing. `evilportal` qualifies — `evil_portal.cpp:95` only *reads*
+  the flag. `find_i2c_addresses()` does **not** qualify (`i2c_finder.cpp:33` sets it),
+  and is unreachable from the CLI anyway: the `i2c` verb is wired to a different,
+  text-only callback (`util_commands.cpp:448`).
+
+That leaves `POST /cm cmnd=evilportal` as the only discriminating test available, which
+is also the original repro.
+
+---
+
+### ISSUE-25 — the BT controller aborts the device when internal DMA runs out
+
+**Status:** OPEN · **Severity:** critical (takes the device down) · **Verified**
+2026-07-30 · **ELF-matched decode; non-fatal form reproduced separately**
+
+Under sustained memory pressure the Bluetooth controller fails an internal allocation,
+and emitting the log line about that failure requires **another** allocation which also
+fails, reaching `abort()`.
+
+**Decoded backtrace**, innermost last. `ELF file SHA256: 76d42c72f` matches the flashed
+binary, so this decode is authoritative:
+
+```
+abort() was called at PC 0x40378e97 on core 0
+
+malloc_internal_wrapper        (bt.c.obj)      <- BT controller allocation FAILED
+  malloc_retention_wrapper
+    esp_log / esp_log_va                       <- it tried to log the failure
+      vprintf -> __sfvwrite_r -> __swrite
+        console_write -> uart_write
+          _lock_acquire_recursive
+            lock_init_generic                  <- abort()
+```
+
+Observed at **+342 s** into a portal run with the BLE API armed. The device rebooted
+cleanly and came back healthy: free 80,811, dma 31,732, BLE re-armed, portal stopped.
+
+**Same final mechanism as ISSUE-18, different trigger.** ISSUE-18 reaches
+`lock_init_generic` → `abort()` through `fopen` from `BruceConfig::saveFile`; this
+reaches it through the BT controller's allocator. The shared property is that **newlib
+aborts rather than returning an error when it cannot allocate a lock**, so any
+allocation failure on a path that then logs can take the device down.
+
+**The non-fatal form of the same condition, captured 2026-07-30.** In the ISSUE-12
+run-2 failing state the console recorded:
+
+```
+E (309086) BLE_INIT: Malloc failed
+E (309149) BLE_INIT: Malloc failed
+```
+
+and the device **survived** — because here the log call itself succeeded. So the abort
+is the tail of a spectrum, not a distinct fault: the same BT-controller allocation
+failure either logs and continues, or recurses into `abort()`, depending on whether
+there is enough memory left to emit the message. `BLE_INIT: Malloc failed` on the
+console should therefore be read as "the device is one allocation from rebooting".
+
+**Precondition, measured:** free heap in the 12–17 KB band with the largest DMA block
+under ~8 KB. Both observations sit there.
+
+**Fix direction (not implemented):** the device cannot prevent newlib's abort, so the
+only real defence is not entering the band — refuse to arm a second radio consumer
+below a DMA-block floor, in the spirit of `radioHasMemForBle()`'s existing 15 KB gate
+(`radio_mem.h:32`).
+
+---
+
+### ISSUE-26 — the BLE GATT *write* is rejected under memory pressure, not just the reply
+
+**Status:** OPEN · **Severity:** high (loses the command, not just the answer) ·
+**Verified** 2026-07-30
+
+ISSUE-16 documents replies truncating or arriving empty while the command still
+executes. This is strictly worse: the **write itself** is refused at the GATT layer, so
+the command never reaches the device at all.
+
+Observed as a precursor to the ISSUE-25 abort, from `bleak`:
+
+```
+BleakGATTProtocolError: (BleakGATTProtocolErrorCode.UNLIKELY_ERROR: 14,
+                         'GATT Protocol Error: Unlikely Error')
+```
+
+`0x0E` (Unlikely Error) is the ATT error the NimBLE stack returns when it cannot
+service the write.
+
+**Why this matters to the app, and why it is the opposite of ISSUE-16's guidance.**
+ISSUE-16 says an empty reply means the side effect *has* happened, so do not retry.
+Here the side effect has **not** happened, and a retry is correct. The two are
+distinguishable at the client: ISSUE-16 is a successful write with a short or empty
+notify; ISSUE-26 is a write that raises. An app must branch on that, or it will either
+double-execute commands or silently drop them.
+
+**Not established:** the exact heap threshold, and whether the rejection is ever
+transient enough for a retry to succeed without first freeing memory.
+
+---
+
+### ISSUE-27 — the `192.168.4.1` captive-portal gateway default never applies on a configured device
+
+**Status:** OPEN · **Severity:** medium (defeats Android/iOS portal auto-detection) ·
+**Verified** 2026-07-30 · **Confirmed by a real DHCP lease**
+
+`evilportalCmdCallback` sets the phone-friendly gateway **only when the stored value is
+empty** (`attack_commands.cpp:58-59`):
+
+```cpp
+if (bruceConfig.evilPortalGatewayIp.isEmpty()) {
+    bruceConfig.evilPortalGatewayIp = "192.168.4.1";
+}
+```
+
+But the config loader never leaves it empty — it defaults to **`172.0.0.1`**
+(`config.cpp:332`). So on any device whose config has been written once, the branch
+never fires and the portal comes up on `172.0.0.1`.
+
+**Confirmed on hardware, not inferred:** a laptop associating to the portal received a
+lease with gateway **`172.0.0.1`**, and the portal answered there.
+
+**The code argues against its own behaviour.** The comment directly above that branch
+states that `172.0.0.1` breaks Android/iOS captive-portal auto-detection and that
+phones expect `192.168.4.1`. If that is correct, then the compatibility it exists to
+provide **is not in effect on this device, and never has been** — the default is
+unreachable in practice.
+
+**Not established:** whether `172.0.0.1` actually suppresses the captive-portal prompt
+on a real handset. The claim comes from the comment; it has not been tested against a
+phone. Test that before treating this as a functional defect rather than a dead branch.
+
+**Fix direction:** either set the gateway unconditionally on the portal path, or drop
+the dead `isEmpty()` branch and change the loader default — but settle the handset
+question first, since the two fixes have opposite consequences.
+
+---
+
+### ISSUE-28 — `beginAP()` starts the DNS and HTTP servers even when the AP failed to come up
+
+**Status:** OPEN (blocking verb only) · **Severity:** medium · **Verified** by code
+2026-07-30
+
+`EvilPortal::beginAP()` captures whether the AP actually started and then ignores it
+(`evil_portal.cpp:137-152`):
+
+```cpp
+_apOnAir = WiFi.softAP(apName, emptyString, _channel);
+if (!_apOnAir) {
+    Serial.printf("[PORTAL] softAP failed for SSID '%s' on ch%d\n", ...);   // reaches nobody
+}
+wifiConnected = true;                 // set regardless
+...
+setupRoutes();
+dnsServer->start(53, "*", WiFi.softAPIP());
+webServer.begin();                    // all three unconditional
+```
+
+Three separate problems compound:
+
+1. **The failure is reported only through `Serial`**, which per ISSUE-22 reaches nothing
+   on this board — not the console, not the app.
+2. **`wifiConnected = true` is set unconditionally** (`:144`), so the rest of the
+   firmware believes an AP exists.
+3. **A failed start still claims port 53 and starts the web server** (`:149-151`),
+   leaving the shared DNS server bound with no AP behind it. `karma` shares that DNS
+   server, so the leak is cross-feature.
+
+The same unconditional sequence appears a second time on the restart path
+(`:283-288`), which does not even capture `softAP()`'s return.
+
+**Scope — the background path is already guarded, the blocking verb is not.** The
+headless work added `_apOnAir` and the `apOnAir()` accessor precisely so
+`evilportal -bg` could report a failed start instead of a false success (commit
+`4c4378a1`). That guard is in the *caller*. `beginAP()` itself is unchanged, so the
+**blocking `evilportal` verb still commits all of this state before knowing whether the
+AP exists**.
+
+**Fix direction:** return `bool` from `beginAP()`, skip `:149-151` and the
+`wifiConnected` assignment when `softAP()` failed, and use `log_e` rather than
+`Serial.printf`.
+
+---
+
+### ISSUE-29 — `POST /cm cmnd=nav` latches button globals that the main menu never clears
+
+**Status:** OPEN · **Severity:** medium · **Verified** by code 2026-07-30
+
+The `nav` handler sets the button globals and never resets them
+(`webInterface.cpp:537-552`):
+
+```cpp
+auto tmp = millis() + time;
+while (tmp > millis()) {
+    AnyKeyPress = true;
+    SerialCmdPress = true;
+    *var = true;                                   // never set back to false
+    if (!LongPress) vTaskDelay(pdMS_TO_TICKS(190));
+    else vTaskDelay(pdMS_TO_TICKS(50));
+}
+```
+
+It relies entirely on a consumer calling `check()`, which clears the flag as it reads
+it. **On the main menu that consumer does not run for `EscPress`** — the check is
+gated (`display.cpp:647`):
+
+```cpp
+if (menuType != MENU_TYPE_MAIN && check(EscPress)) { index = -1; break; }
+```
+
+So `POST /cm cmnd=nav esc` delivered while the device sits on the main menu latches
+`EscPress` **true indefinitely**. `AnyKeyPress` and `SerialCmdPress` are set on every
+`nav` regardless of target and have no consumer on this path either.
+
+Note also the default hold is 10 ms (`else time = 10`) while the loop body delays
+190 ms, so exactly one iteration always runs — the "hold duration" is not what it
+appears to be for anything except the `…0`-suffixed forms.
+
+**Consequence:** a latched `EscPress` is consumed by the *next* menu the operator opens,
+which will appear to exit itself immediately for no visible reason. This is a plausible
+contributor to ISSUE-30 but has **not** been shown to cause it.
+
+**Confirmed on the wire while investigating**: `nav` really is special-cased in the
+AsyncWebServer task *before* queueing — the reply is `command nav esc success`, not
+`command <verb> queued`. That upgrades a previously code-only claim in `BRUCELINK.md`.
+
+**Fix direction:** clear the flags after the hold loop, or give the main-menu path a
+consumer for `EscPress`.
+
+---
+
+### ISSUE-30 — the main loop task can wedge while every other task keeps running
+
+**Status:** OPEN · **Severity:** high (device is unusable at the board; remote surfaces
+still answer) · **Observed once** 2026-07-30 · **ROOT CAUSE NOT ESTABLISHED**
+
+The device became unresponsive at the board — static screen, dead buttons — while
+remaining fully responsive over both remote transports. Only a physical RST recovered
+it.
+
+**Evidence, all captured before the reset:**
+
+| Probe | Result |
+|---|---|
+| Screen | Main menu displayed |
+| Status-bar clock | **frozen** across >30 s |
+| Physical buttons | no effect, operator confirmed |
+| BLE `uptime` | **answers in 60–122 ms**, value advancing (00:05:42 → 00:13:32) |
+| `POST /cm` | `command uptime queued`, kept working |
+| Console | **no** abort, Backtrace, assert, Guru, watchdog or unplanned `rst:0x` |
+
+The frozen clock is the load-bearing observation: `drawStatusBar()` runs
+unconditionally every 30 s inside `loopOptions()` on `MENU_TYPE_MAIN`
+(`display.cpp:592-595`), independent of input. A frozen clock therefore means the main
+loop task is **blocked**, not merely ignoring input. BLE parsing runs on the serial
+task, which is why the CLI kept answering.
+
+**Memory was tested as a hypothesis and REJECTED.** At freeze time heap was collapsing
+(free 15,015 → 11,267; dma largest 6,900 → 2,804; `minEver` 1,211), so "cannot allocate
+to draw" was plausible. Dropping the station and running `webui -off` restored free to
+**58,015** and dma largest to **19,444** — and the screen stayed frozen and the buttons
+stayed dead. Recorded because it is a clean falsification, not a guess.
+
+**Excluded:** `checkReboot()`, the first call on the `MENU_TYPE_MAIN` path, is an empty
+stub on this board (`mykeyboard.cpp:1454`).
+
+**Candidates, none discriminated:** a blocking `options[chosen].operation()`
+(`display.cpp:738-748`); a spin inside `ConfigMenu::optionsMenu()`'s `while (true)`; a
+latched `forceMenuOption`; a latched button global (ISSUE-29).
+
+**Why no backtrace exists:** nothing panics and no watchdog fires, so there is no
+automatic dump. The one line that would discriminate the first candidate,
+`Serial.println("Selected: " + …)` at `display.cpp:744`, goes to `Serial`, which per
+ISSUE-22 reaches nothing on this board. **Changing that one line to `log_e` is the
+cheapest next experiment** and would likely settle it.
+
+**Trigger sequence, for repro attempts.** Order matters, and note **no `nav` was sent
+before the freeze** — the `nav esc` pulses came afterwards and did unwind the UI back
+to the main menu without unwedging it:
+
+1. Fresh boot; `webui -bg` at `t=20 s`.
+2. Laptop associated by static IP; `POST /login` OK.
+3. `POST /cm cmnd=uptime` → queued. This fired `backToMenu()` while the device was on
+   the **main menu**.
+4. Operator navigated into the **Config submenu**.
+5. Freeze.
+
+**Not the same as ISSUE-11.** Those were unexplained *reboots* with no console capture.
+This is a *hang* with a full capture that shows no reset at all.
+
+**Calibration worth keeping:** on this board the RST button produces
+`rst:0x1 (POWERON)`, while a software `reboot` produces `rst:0xc (RTC_SW_CPU_RST)`. The
+two are distinguishable in any capture, which is how an operator reset was told apart
+from a firmware fault during this session.
+
+---
+
+### ISSUE-31 — Evil Portal's destructor is empty, so `karma` leaks the shared DNS server
+
+**Status:** OPEN · **Severity:** low · **Verified** by code 2026-07-30 · **Recorded
+deliberately without a fix**
+
+`EvilPortal::~EvilPortal()` is empty (`evil_portal.cpp:38`). `karma`'s
+`destroyActivePortal()` (`karma_attack.cpp:684`, called from six sites) deletes the
+portal object, so nothing releases the DNS server bound on port 53 or restores the WiFi
+mode. Same class as ISSUE-28's failure path, but in upstream code rather than this
+fork's.
+
+**`shouldTerminate()` is dead code.** `evil_portal.cpp:419` defines it and
+`evil_portal.h:57` declares it; a tree-wide grep finds **no callers**. It is worth
+naming explicitly because it looks like it would explain the portal exiting unprompted
+that this register has recorded as unexplained — **it does not**, because it never
+runs. That observation stays open.
+
+**Left unfixed on purpose:** both sit in upstream code outside the headless-portal
+change, and this fork prefers additive changes in new files to keep merges clean.
+
 ---
 
 ## Not tested, and why
@@ -1297,8 +1775,12 @@ Recorded so the gap is visible rather than implied. Session of 2026-07-29, unatt
 | `wifi add` / `wifi on` / `wifi off` | The user chose the AP path for this session, which does not exercise them. Zero evidence either way. |
 | ~~FastPair **handset** popup after `c9c43c03`~~ | **DONE 2026-07-29** — Android popup confirmed by the user, with 16 valid `0xFE2C` adverts captured concurrently. See §Resolved ISSUE-8. |
 | ~~Evil Portal under load~~ | **DONE 2026-07-29** — it crashes, same assertion as `deauth`. Confirms the ISSUE-1 hypothesis; see ISSUE-1. |
-| Evil Portal capturing a real credential | **Still untested, and now blocked** — the portal never serves a form (ISSUE-21), so there is nothing to submit. `md5` of the creds file was unchanged across the run, so this is confirmed-not-tested rather than assumed. |
-| Free heap during an active Evil Portal | Not captured. The verb blocks the CLI for its whole life and the device crashed before release. Needed to prove or reject the memory hypothesis in ISSUE-21. |
+| ~~Evil Portal capturing a real credential~~ | **DONE 2026-07-29 with `ble api off`** — `testvictim@example.com` / `NotARealPassword123` captured and returned at `/creds`. See §Resolved-in-place in ISSUE-21. **Not re-run since the headless verb landed**, and still impossible with the BLE API armed. |
+| ~~Free heap during an active Evil Portal~~ | **DONE 2026-07-30** — 16,915 free / 8,180 dma at portal start with BLE armed, versus 80,951 / 31,732 idle. This confirmed the memory hypothesis in ISSUE-21. |
+| **ISSUE-24's fix (`d71f19e9`) on hardware** | **Still unverified after three attempts** 2026-07-30 — one invalidated by an operator RST, one blocked by the ISSUE-12 memory ceiling, one designed wrong (device parked in a submenu, where the repaint provably cannot fire). The only discriminating test is `POST /cm cmnd=evilportal`; see ISSUE-24. |
+| Credential capture with the **headless** portal | Approved but never run. Needs `ble api off` for the heap, plus a short duration cap so the portal self-stops — the cap is proven (+45.6 s on a 45 s cap) which is what makes the BLE-off configuration recoverable at all. |
+| ISSUE-30's root cause | No backtrace obtainable — nothing panics, no watchdog fires. Next experiment is changing `display.cpp:744`'s `Serial.println` to `log_e` so the "Selected:" line becomes visible. |
+| Whether `172.0.0.1` really breaks handset captive-portal detection | ISSUE-27 rests on a code comment, not a handset test. The fix direction depends on the answer. |
 | `poweroff`, `sleep` | Would take the device down with nobody present to power-cycle it. `reboot` was tested instead and passed 2/2. |
 | `blespam random`/`all`, interactive `blespam menu` | Menu-driven; needs on-device dismissal. |
 | MTU 247 negotiation | BlueZ negotiates 128 and will not go higher; needs an Android client. Chunking remains half-verified. |

@@ -230,14 +230,29 @@ Not built, and not planned unless the app actually needs them:
   third task to the same unarbitrated display. The fix is either to serialise all
   TFT access behind one owner, or to give these verbs headless entry points that
   never draw, the way `blespam` already works.
-- **A headless `evilportal`.** It belongs in the list above: the CLI verb builds a
-  stack-local `EvilPortal` with `backgroundMode=false`, so the constructor calls
-  `loop()`, whose only exit is ESC → "Exit Portal" on the device. There is no
-  duration check and no remote stop. A working headless path already exists —
-  Karma heap-allocates the portal with `backgroundMode=true` and pumps
-  `processRequests()` (`karma_attack.cpp:1786,1747`) — but the CLI verb does not
-  use it, and simply flipping the flag would destroy the stack temporary. See the
-  API contract §5.3.
+- ~~**A headless `evilportal`.**~~ **BUILT 2026-07-30.** The blocking verb still
+  behaves as described here — a stack-local `EvilPortal` with
+  `backgroundMode=false`, exiting only via ESC → "Exit Portal" — but
+  `evilportal -bg` now heap-allocates the portal, holds the pointer in
+  `evil_portal_bg.{h,cpp}`, and pumps `processRequests()` from the serial task's
+  tick (`serialcmds.cpp:52-58`) rather than the main loop, because that task
+  already runs every 10 ms and never sinks into an on-device menu. `-off` and
+  `-status` provide the remote stop; `-duration` provides the timeout, defaulting
+  to 600 s.
+
+  **Why the cap is not optional.** With `ble api off` — the only configuration
+  with enough heap to actually serve the page — nothing can reach the device to
+  stop a portal, so the clock is the sole recovery path. That is why a finite
+  default was chosen over unlimited, and why non-numeric and negative
+  `-duration` values are rejected rather than silently mapped to `0`.
+
+  Proven on hardware (ELF `76d42c72f2b4a8a4`, 2026-07-30): `uptime` over BLE
+  answered in **0.06 s** during a live portal, the cap self-stopped one at
+  **+45.6 s** on a 45 s setting, and **zero** stray bytes appeared on the CLI
+  characteristic across the firing. See the API contract §5.3.
+
+  It does **not** lift the memory ceiling: serving the 4,726-byte page still
+  requires `ble api off` (KNOWN_ISSUES §ISSUE-21).
 - **`deauth <target>` targeting.** The argument is accepted and discarded; the
   verb opens the on-device menu.
 - **Simultaneous BLE + Wi‑Fi as a steady state.** It works, but with ~15 KB free

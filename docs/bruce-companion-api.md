@@ -65,6 +65,23 @@ With BLE armed, a single HTTP request for real content drove free heap to **812
 bytes** and broke *both* transports at once. Only tiny replies (a `401`) survived.
 `ble api off` frees **63,576 bytes** and everything works immediately.
 
+> **CORRECTED 2026-07-30 — "cannot run simultaneously" is too strong.** On ELF
+> `76d42c72f2b4a8a4`, with the BLE API armed and the WebUI up (15,015 free /
+> **dma largest 6,900**), `POST /login` returned **302 + cookie in 1.33 s** and
+> `POST /cm` returned `command uptime queued`, while BLE `uptime` kept answering — all
+> in the same session. A second fresh boot at 14,307 free / **dma 6,132** could not
+> complete a login at all (`http=000` ×4).
+>
+> So the two transports **do** coexist, but with a margin measured in **hundreds of
+> bytes**, and the failing case is real. What is categorical is narrower and matches
+> the table above: **a response with a real body** cannot be served with BLE armed.
+> TCP accepts, small replies (302, a 21-byte `/cm` ack) succeed, and `GET /` returns
+> zero bytes. See KNOWN_ISSUES §ISSUE-12 for the three-boot variance table and
+> §ISSUE-16 for the accept-but-cannot-build isolation.
+>
+> **For the app the practical advice is unchanged**: treat them as alternating, because
+> you cannot predict which side of the margin a given boot lands on.
+
 **The switch workflow, verified end to end 2026-07-29:**
 
 1. BLE is primary control.
@@ -376,7 +393,9 @@ needs both answers, so they are now separate columns.
 | `webui -off` | no | immediately | — | stops the WebUI **and its AP**; frees the memory for BLE. Verified 2026-07-29 |
 | `webui -bg` | no | immediately | — | starts the WebUI and returns instead of holding the screen. Returned in 357 ms, 2026-07-29. Still prints "Press ESC to quit" — stale text, it does return |
 | `blespam <type> <count>` | no | **after the burst** | `state`, `ble_progress`, `ble_result` — but see below | self-completing, verified 5/5. `fastpair_*` fixed in `c9c43c03` (§5.1). Suspends the BLE link for **0.5–11.9 s** (measured); tolerate ~12 s. Types in §5.1; count < 1 → 10 |
-| `evilportal <ssid> <ch> [template]` | **YES** | **only after dismissal** | ⚠️ `state: portal` only | defaults: ssid `Free Wifi`, ch `6`. **CRASHES UNDER LOAD** — same `xTaskPriorityDisinherit` assert as `deauth`, ELF-matched backtrace, ~11 min with a client associated (KNOWN_ISSUES §ISSUE-1). **And it cannot serve its own page** — form fields never render, 7/7 fetches failed (§ISSUE-21). No event on page view or credential capture. Do **not** ship as a one-tap action |
+| `evilportal <ssid> <ch> [template]` | **YES** | **only after dismissal** | ⚠️ `state: portal` only | The **blocking** form. defaults: ssid `Free Wifi`, ch `6`. **CRASHES UNDER LOAD** — same `xTaskPriorityDisinherit` assert as `deauth`, ELF-matched backtrace, ~11 min with a client associated (KNOWN_ISSUES §ISSUE-1); unchanged by the headless work. Also commits DNS/HTTP state even when the AP failed to start (§ISSUE-28). Do **not** ship as a one-tap action — **use `-bg`** |
+| `evilportal -bg [-duration <sec>]` | **no** — returns immediately | `-off`, or the duration cap | `state`, `ble_progress`-style portal frames | **Headless, and the one menu-dispatcher verb that is safe to ship.** `uptime` over BLE answered in 0.06 s during a live portal; cap self-stopped at +45.6 s. Cap default **600 s**, `0` = unlimited, malformed values rejected. Serving the page still needs `ble api off` (§ISSUE-21) |
+| `evilportal -off` / `-status` | no | — | — | `-off` returns `no background portal running` when idle rather than a false success |
 | `deauth [<target>]` | ☠️ **CRASHES THE DEVICE** | never — it panics | — | see below and KNOWN_ISSUES §ISSUE-1. `target` is parsed but ignored (`attack_commands.cpp:152`) |
 | `karma` | **YES** | only after dismissal | — | opens the TFT menu. Tested 2026-07-29: blocks, no crash in 90 s |
 | `blesniffer` | **YES** | only after dismissal | — | opens the BLE Suite menu. Tested: blocks, no crash in 90 s; the BLE control link survives |
@@ -481,7 +500,49 @@ succeeding, or a `free`/`systeminfo` round-trip over BLE.
 
 A future patch could run them in a dedicated task; not done.
 
-### 5.3 `evilportal` has no timeout and no remote stop
+### 5.3 `evilportal` — headless mode (shipped), and the blocking form's limits
+
+> **UPDATED 2026-07-30 — a headless `evilportal` now exists.** Everything below the
+> horizontal rule describes the **blocking** form and is still accurate for it. The
+> section header previously read "has no timeout and no remote stop", which is no
+> longer true of the verb as a whole.
+
+**Verb surface:**
+
+```
+evilportal [ssid] [channel] [template] [-bg] [-duration <sec>] [-off] [-status]
+```
+
+| Form | Behaviour |
+|---|---|
+| `evilportal [ssid] [ch] [tpl]` | **Blocking.** Holds the serial task for its entire life; ends only on the device. See below. |
+| `evilportal -bg …` | **Headless.** Returns immediately; the portal is pumped from the serial task's tick. |
+| `evilportal -off` | Stops a background portal. Returns `no background portal running` if there is none — not a false success. |
+| `evilportal -status` | `portal: stopped` / running detail. Answers during a live portal. |
+| `-duration <sec>` | Cap in seconds. **Default 600.** `0` disables the cap. Non-numeric and negative values are **rejected** and start no portal. |
+
+Defaults are unchanged: ssid `Free Wifi`, channel `6`.
+
+**Proven on hardware** (ELF `76d42c72f2b4a8a4`, 2026-07-30): `uptime` over BLE answered
+in **0.06 s** during a live background portal; `-status` answered 9 consecutive times;
+the cap self-stopped a portal at **+45.6 s** on a 45 s setting, emitting
+`portal duration cap reached` → `state:idle` → `portal stopped`, with **zero** stray
+bytes on the CLI characteristic.
+
+**Why the cap matters more than it looks.** With `ble api off` there is no remote
+surface at all (ISSUE-22), so the clock is the *only* thing that can end a portal
+without the operator walking to the device. That is what makes the BLE-off
+configuration — the only one with enough heap to actually serve the page — recoverable.
+Never set `-duration 0` in that configuration.
+
+**Still constrained by memory.** With the BLE API armed the portal starts (16,915 free
+/ 8,180 dma) but `GET /` delivers only ~2,766 of 4,726 bytes before stalling, and the
+credential fields live in the last ~600 bytes. Serving the page still requires
+`ble api off` (KNOWN_ISSUES §ISSUE-21).
+
+---
+
+#### The blocking form: no timeout, no remote stop
 
 `evilportalCmdCallback` (`attack_commands.cpp:51`) constructs a **stack-local**
 `EvilPortal(ssid, channel, false, false, /*autoMode=*/true, /*backgroundMode=*/false,
@@ -500,7 +561,10 @@ A headless path already exists and is in production use: Karma heap-allocates
 (`evil_portal.cpp:375`). Flipping the flag in the CLI verb alone would **not** work —
 the stack temporary is destroyed at the end of the statement, killing the portal.
 Making `evilportal` one-tap means heap-allocating it, holding the pointer, pumping
-`processRequests()` from the main loop, and adding a stop verb. Not done.
+`processRequests()` from the main loop, and adding a stop verb. ~~Not done.~~
+**Done** — that is exactly what `-bg` does, except the pump lives on the serial task's
+tick rather than the main loop, because the serial task already runs every 10 ms and,
+unlike the main loop, never sinks into an on-device menu (`serialcmds.cpp:52-58`).
 
 ### 5.4 BLE API persistence and boot
 
@@ -662,9 +726,11 @@ Listed so nobody plans against them:
 - `/ws` `{cmd:"subscribe", since:…}` and any server-side event replay.
 - `deauth <target>` targeting — the argument is accepted and discarded.
 - `state` frames for any verb other than `evilportal` and `blespam`.
-- Non-blocking execution of the menu-dispatcher verbs.
-- A headless `evilportal` — no duration, no remote stop, ends only on the device
-  (§5.3).
+- Non-blocking execution of the menu-dispatcher verbs — `deauth`, `karma`,
+  `blesniffer`, `ap_info`, `pwngrid`. `evilportal` is now the **exception**, not an
+  example (§5.3).
+- ~~A headless `evilportal`~~ — **built.** `-bg`, `-off`, `-status` and a duration cap,
+  verified on hardware 2026-07-30 (§5.3).
 - Runtime hardware probing behind `/systeminfo` `capabilities` (§3.1) — the flags
   describe the board profile, not what is fitted.
 - Any remote-abort path over BLE. `POST /cm cmnd=nav esc` is the only remote stop,
