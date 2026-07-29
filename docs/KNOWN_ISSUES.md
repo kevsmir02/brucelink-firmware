@@ -355,6 +355,17 @@ both ran clean: `millis()` monotonic across every sample (150s->592s over 46 sam
 markers in either capture. That is ~441 s of continuous uptime spanning both sweeps,
 against a fault that showed up inside ~300 s the one time it occurred.
 
+**Second occurrence, 2026-07-29 (later session).** The device rebooted unprompted again
+while blocked in `blesniffer` with the WiFi stack torn down (see ISSUE-19). Reported by
+the user; **no console was being captured at that moment**, so again there is no
+backtrace and no reset reason. Uptime afterwards confirmed a fresh boot (free 81,187,
+largest 31,732). Context is sharper this time — `blesniffer` reaches `loopOptions`,
+which draws from the serial task, i.e. the ISSUE-1 mechanism, and the earlier sweep had
+only ever left it blocked for 90 s whereas this run was several minutes. **That is a
+hypothesis, not a finding**: the capture that would prove or refute it does not exist.
+The obvious experiment is to hold `blesniffer` blocked with `usbwatch2.py` running for
+the whole window.
+
 **Do not read this as fixed or as caused by `c9c43c03`; neither is established.** It
 is recorded because a one-off reset that is not understood is worth recognising if it
 recurs. Next step if it does: keep `usbwatch2.py` running for the whole session so the
@@ -730,7 +741,84 @@ on the hardware above, 2026-07-29, over the BLE CLI characteristic unless stated
 | Missing-module verbs fail cleanly | `nrf24`, `gps`, `getscreen` → `ERROR: Command not found` (no `nrf_commands.cpp`/`gps_commands.cpp` exist). `rfid info` → "No tag data…", `rfid reset` → "No active RFID module." `ir rx` bounded at ~9.1 s. |
 | `js` executes correctly | Proven by side effect: `storage.write("/js_ran.txt","JS_EXECUTED")` then `cat` returned the content. Output/errors are a separate defect (ISSUE-15). |
 | Heap fully recovers on reboot | After WebUI + JS runs left free at 44,255 / largest 11,252, a reboot restored 81,391 / 31,732 exactly, and `ls /` returned to a complete 297 bytes. |
+| **HTTP `nav` rescue releases a blocked verb** | `ap_info` blocked (BLE silent), then `POST /cm cmnd=nav sel` ×6 at 1 s intervals released it — `uptime` answered in 152 ms, uptime continuous 2:00→6:54→7:25, zero crash markers. **One pulse is not enough** — see ISSUE-19. |
+| HTTP survives a non-radio blocking verb | With `ap_info` holding the serial task, `POST /cm cmnd=uptime` still returned `command uptime queued` / 200. The AsyncWebServer task is genuinely independent of the CLI queue. |
+| `POST /cm` auth + queueing | Cookie auth accepted; returns `command <verb> queued` and never the output, as documented. |
 | Menu exit paths | `loopOptions` breaks on `check(EscPress)` for non-main menus (`display.cpp:647`); `addOptionToMainMenu()` also pushes a `Main Menu` option calling `backToMenu()` (`utils.cpp:27-30`). Either works. |
+
+---
+
+### ISSUE-19 — the HTTP `nav` rescue works, but needs repeated pulses and is unavailable for every radio verb
+
+**Status:** OPEN · **Severity:** high (it is the only remote recovery path there is) ·
+**Verified** 2026-07-29 · **Rescue confirmed on `ap_info`; both blockers reproduced**
+
+`POST /cm cmnd=nav <button>` **does** release a blocked verb — this was previously
+code-verified only. But two things make it far narrower than the contract implied.
+
+**1. A single pulse is not enough.** `ap_info` was dispatched over BLE and confirmed
+blocking (no reply to it, nor to a follow-up `uptime`). Then, all accepted `http=200`:
+
+| Attempt | Result |
+|---|---|
+| `cmnd=nav sel` (one pulse) | still blocked |
+| `cmnd=nav sel 1000` ×2, then `cmnd=nav esc 1000` | still blocked |
+| `cmnd=nav sel` ×6, 1 s apart | **released** — `uptime` answered in 152 ms |
+
+Uptime was continuous across the whole sequence (2:00 → 6:54 → 7:25) so this was a
+genuine release, not a reboot, and the capture contains **zero** crash markers.
+
+Two properties of the code explain why one pulse fails. The handler only holds the
+button for **10 ms** unless the command *ends in a `0`* —
+`if (cmnd.endsWith("0")) time = …; else time = 10;` (`webInterface.cpp:546-548`) — so
+`nav sel` is a single ~190 ms pulse. And the waiter takes two edges, not one:
+
+```cpp
+// scrollableTextArea.cpp:73-83
+while (check(SelPress))  { update(force); yield(); }   // wait for RELEASE
+while (!check(SelPress)) { update(force); yield(); }   // then wait for PRESS
+```
+
+A single held pulse can be consumed entirely by the release-wait, leaving the
+press-wait unsatisfied. Repeated pulses *with gaps* supply both edges.
+
+**The exact minimum was not measured** — 1 failed and 6 worked, with intermediate
+attempts in between. Treat "repeat until the device answers" as the contract, not a
+fixed count.
+
+**2. The rescue is unavailable for every verb that touches a radio.** Two independent
+mechanisms destroy the HTTP transport before it can be used:
+
+- **WiFi verbs kill the WebUI on entry.** `cleanlyStopWebUiForWiFiFeature()` is called
+  by `deauthFloodAttack` (`wifi_atks.cpp:369`), `capture_handshake` (`:447`),
+  `target_atk` (`:732`), `karma` (`karma_attack.cpp:2559`), `evilportal`
+  (`evil_portal.cpp:29`) and `sniffer` (`sniffer.cpp:1139`).
+- **BLE verbs destroy WiFi.** Reproduced live: `blesniffer` dispatched with the WebUI
+  up and a station associated tore the WiFi stack down —
+  `wifi_init_default: netstack cb reg failed with 12308` and
+  `disconnect(): STA disconnect failed! 0x3001: ESP_ERR_WIFI_NOT_INIT`. The AP
+  dropped, the laptop disconnected, and `POST /cm` could no longer be delivered.
+
+  **Mechanism SUSPECTED, not verified.** The only matching code path is
+  `radioHasMemForBle()` (`BLE_Suite.cpp:313`), whose precondition is measured — the
+  largest DMA block with the WebUI up was **7,156**, under the 15,360
+  `RADIO_BLE_MIN_DMA_BLOCK` threshold (`radio_mem.h:32`) — and whose fallback calls
+  `wifiDisconnect()`. But **neither** its `[RAM] Low contiguous DMA memory…` line nor
+  `displayError("Low RAM: free WiFi/SD first")` appears in the capture. The other
+  candidate, the explicit `wifiDisconnect()` at `BLE_Suite.cpp:302-311`, is **ruled
+  out**: it is gated on `FORCE_RADIO_TEARDOWN_ON_SWITCH`, which is `false` here
+  because the PSRAM-conditional around it is disabled by an `#if 0`
+  (`ble_common.h:32-40`). The USB console has demonstrably dropped output under
+  memory pressure this session, so the missing log line is weak evidence either way.
+
+**So the rescue only works for blocking verbs that touch neither radio** — `ap_info`
+and possibly `pwngrid`. For `deauth`, `karma`, `evilportal`, `sniffer` and
+`blesniffer` there is **no remote recovery path at all**, over either transport.
+
+**Consequence for the app.** Offer the rescue only for the verbs it can actually
+serve, and pulse until the device answers rather than firing once. For the radio
+verbs, the honest UI is to warn before dispatch that the action can only be ended at
+the device — not to offer a cancel button that cannot work.
 
 ---
 
@@ -740,7 +828,9 @@ Recorded so the gap is visible rather than implied. Session of 2026-07-29, unatt
 
 | Item | Why not |
 |---|---|
-| `POST /cm cmnd=nav esc` against a running blocking verb | **The highest-value untested item.** Reached the point of having HTTP working and authenticated, but the login path aborts/wedges the device under load (ISSUE-18) before a blocking verb could be started and rescued. Needs ISSUE-18 addressed first, or a session where a physical reset is available. Still **code-verified only** (`webInterface.cpp:537-556` writes `EscPress` directly, ahead of the queue). |
+| ~~`POST /cm cmnd=nav esc` against a running blocking verb~~ | **DONE 2026-07-29** — see ISSUE-19. The rescue works on `ap_info` but needs repeated pulses, and is unavailable for every radio verb. |
+| Minimum pulse count for the `nav` rescue | 1 failed, 6 succeeded, with other attempts in between; the exact threshold was not bisected. Would need a fresh block per trial. |
+| Whether `pwngrid` is rescuable | It is the only other blocking verb that appears to touch neither radio, so it should be, but it was not tested. |
 | `/getscreen`, `/listfiles`, `/file`, `/upload`, `/edit`, `/rename`, WS `/ws` | Same blocker. `GET /` (200) and `GET /systeminfo` (401 unauth) are the only routes exercised. |
 | `badusb run_from_file` / `run_from_buffer`, BLE HID variant | **Deliberately skipped.** It emits real USB HID keystrokes into the attached host — here, the laptop running the test session, whose focused window is a terminal. Unsafe unattended; needs an attended session with a scratch window focused. Note `print`/`println` in JS are the *badusb* natives (`mqjs_stdlib.h`), so JS payloads carry the same hazard. |
 | `wifi add` / `wifi on` / `wifi off` | The user chose the AP path for this session, which does not exercise them. Zero evidence either way. |
