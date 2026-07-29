@@ -38,19 +38,26 @@ as bulk transfer only.
 But BLE and WiFi fight over the same scarce resource: internal DMA-capable RAM. PSRAM
 **cannot** back the BT controller. `radioHasMemForBle()` (`core/radio_mem.h`) admits a
 BLE attack only when the largest **contiguous DMA block** clears 15 KB, and when the
-check fails its fallback tears down WiFi to make room. With the BLE API up it is
-therefore **the memory guard, not the attack**, that kills the AP.
+check fails its fallback tears down WiFi to make room. So with the BLE API up it is
+plausibly **the memory guard, not the attack**, that kills the AP — but note that when
+this was actually observed (`blesniffer` destroying a live AP, ISSUE-19) *neither* of
+the guard's log lines reached the console, so the attribution is **SUSPECTED**, not
+verified. The competing path is ruled out: `FORCE_RADIO_TEARDOWN_ON_SWITCH` is `false`
+here (`ble_common.h:32-40`, disabled by an `#if 0`).
 
 Consequences that shape most of the code:
 
 - Free heap does not predict this. Use the `free` verb, which reports the largest
   contiguous DMA block explicitly.
-- **"WiFi as bulk transfer" is aspirational, not current behaviour.** Measured
-  2026-07-29: with the BLE API armed, `webui` cannot start at all — AsyncTCP fails to
-  allocate its task with 1,235 bytes free, the HTTP server never listens, and the AP
-  beacons but cannot accept a station. BLE replies truncate to 1 byte in the same
-  state. The two transports are not merely tight together, they are mutually
-  exclusive today. See `docs/KNOWN_ISSUES.md` §ISSUE-12.
+- **The two transports coexist, but with almost no margin.** Measured 2026-07-29:
+  from a *fresh boot* `webui` starts fine and `systeminfo` answers over BLE with the
+  AP up (`free_heap:14140`), and a laptop associates and gets a DHCP lease. From a
+  boot where anything already took ~18 KB — a single `js` run is enough (ISSUE-17) —
+  the same command silently starts nothing: AsyncTCP fails to allocate with 1,235
+  bytes free, the AP beacons but cannot accept a station, and BLE replies truncate to
+  1 byte. `webui -bg` reports success either way. See `docs/KNOWN_ISSUES.md` §ISSUE-12.
+  **This entry first claimed the transports were mutually exclusive; that was wrong,
+  generalised from one run launched off a dirty baseline.**
 - Never let both radios be loaded at once. `blespam` suspends the BLE API *before*
   touching NimBLE, which frees ~62 KB and takes the DMA block from ~1.3 KB to ~32 KB.
 - Ordering is everything. Tearing BLE down cleanly *before* an attack means the
@@ -238,11 +245,14 @@ with `-DRF_DEBUG=1` if you want them.
   `return true` and discards the outcome (`attack_commands.cpp:147-175`). Observed:
   `reverseshell` reported `TRUE` 30 ms after its AP creation failed outright. It is a
   *completion* signal only.
-- **`deauth` crashes the device.** Menu-dispatcher verbs draw to the TFT from the
-  serial task while the main loop draws the same display over the same SPI bus; the
-  bus mutex ends up released by the wrong task and FreeRTOS asserts. Only `deauth`
-  reproduces so far — it drives `drawArc` continuously, while the survivors redraw
-  only on input. Full backtrace in `docs/KNOWN_ISSUES.md` §ISSUE-1.
+- **`deauth` and `evilportal`-under-load crash the device.** Menu-dispatcher verbs
+  draw to the TFT from the serial task while the main loop draws the same display over
+  the same SPI bus; the bus mutex ends up released by the wrong task and FreeRTOS
+  asserts. **The trigger is any sustained drawing from the serial task, not `drawArc`
+  specifically** — `evilportal` died through `drawStatusBar`/`drawBatteryStatus`, the
+  same status bar the main loop repaints on its 30 s timer. **Therefore an idle test
+  proves nothing**, and every "survivor" in the seven-verb sweep was tested idle for
+  90 s. Both backtraces in `docs/KNOWN_ISSUES.md` §ISSUE-1.
 - **A blocking verb cannot be rescued over BLE**, only over HTTP `/cm nav esc`. And
   the dismissal key differs per verb: `ap_info` exits on **SELECT only** and ignores
   Esc; menu verbs take Esc or a "Main Menu" entry; `evilportal` takes Esc *then*
