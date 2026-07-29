@@ -15,9 +15,14 @@ uint32_t settingsCallback(cmd *c) {
     JsonObject setting = jsonDoc.as<JsonObject>();
 
     if (setting_name.length() == 0 && setting_value.length() == 0) {
-        // no args, just prints current config
-        serializeJsonPretty(jsonDoc, Serial);
-        serialDevice->println("");
+        // no args, just prints current config.
+        // *serialDevice, not Serial: with the BLE API armed serialDevice points at
+        // the GATT service (ble_api.cpp:63), so writing to Serial sent the whole
+        // config to a USB port the companion app cannot read, and the app saw an
+        // empty reply.
+        String cfg;
+        serializeJsonPretty(jsonDoc, cfg);
+        serialDevice->println(cfg);
         return true;
     }
 
@@ -59,36 +64,48 @@ uint32_t settingsCallback(cmd *c) {
     }
 
     // TODO: improve this logic and move to BruceConfig
+    //
+    // `written` exists because passing the toJson() name check above is NOT the
+    // same as being writable: only the fields below are wired to a setter. Every
+    // other serialised field used to fall through to `return true` and report
+    // success while changing nothing, and a successful write returned the same
+    // empty reply as a discarded one, so a client could not tell them apart.
+    bool written = true;
     if (setting_name == "priColor") bruceConfig.setUiColor(setting_value.toInt());
-    if (setting_name == "rot") bruceConfigPins.setRotation(setting_value.toInt());
-    if (setting_name == "dimmerSet") bruceConfig.setDimmer(setting_value.toInt());
-    if (setting_name == "bright") bruceConfig.setBright(setting_value.toInt());
-    if (setting_name == "tmz") bruceConfig.setTmz(setting_value.toFloat());
-    if (setting_name == "soundEnabled") bruceConfig.setSoundEnabled(setting_value.toInt());
-    if (setting_name == "wifiAtStartup") bruceConfig.setWifiAtStartup(setting_value.toInt());
-    if (setting_name == "webUI") {
+    else if (setting_name == "rot") bruceConfigPins.setRotation(setting_value.toInt());
+    else if (setting_name == "dimmerSet") bruceConfig.setDimmer(setting_value.toInt());
+    else if (setting_name == "bright") bruceConfig.setBright(setting_value.toInt());
+    else if (setting_name == "tmz") bruceConfig.setTmz(setting_value.toFloat());
+    else if (setting_name == "soundEnabled") bruceConfig.setSoundEnabled(setting_value.toInt());
+    else if (setting_name == "wifiAtStartup") bruceConfig.setWifiAtStartup(setting_value.toInt());
+    else if (setting_name == "webUI") {
         bruceConfig.setWebUICreds(
             setting_value.substring(0, setting_value.indexOf(",")),
             setting_value.substring(setting_value.indexOf(",") + 1)
         );
-    }
-    if (setting_name == "wifiAp") {
+    } else if (setting_name == "wifiAp") {
         bruceConfig.setWifiApCreds(
             setting_value.substring(0, setting_value.indexOf(",")),
             setting_value.substring(setting_value.indexOf(",") + 1)
         );
-    }
-    if (setting_name == "wifi") {
+    } else if (setting_name == "wifi") {
         bruceConfig.addWifiCredential(
             setting_value.substring(0, setting_value.indexOf(",")),
             setting_value.substring(setting_value.indexOf(",") + 1)
         );
-    }
-    if (setting_name == "wigleBasicToken") bruceConfig.setWigleBasicToken(setting_value);
-    if (setting_name == "wdgwarsApiKey") bruceConfig.setWdgwarsApiKey(setting_value);
-    if (setting_name == "devMode") bruceConfig.setDevMode(setting_value.toInt());
-    if (setting_name == "disabledMenus") bruceConfig.addDisabledMenu(setting_value);
+    } else if (setting_name == "wigleBasicToken") bruceConfig.setWigleBasicToken(setting_value);
+    else if (setting_name == "wdgwarsApiKey") bruceConfig.setWdgwarsApiKey(setting_value);
+    else if (setting_name == "devMode") bruceConfig.setDevMode(setting_value.toInt());
+    else if (setting_name == "disabledMenus") bruceConfig.addDisabledMenu(setting_value);
+    else written = false;
 
+    if (!written) {
+        serialDevice->println("Read-only setting, not writable from the CLI: " + setting_name);
+        return false;
+    }
+
+    // Confirm explicitly. Silence used to mean both "written" and "ignored".
+    serialDevice->println(setting_name + " = " + setting_value);
     return true;
 }
 

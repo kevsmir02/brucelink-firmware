@@ -108,32 +108,21 @@ String readDecryptedFile(FS &fs, String filepath) {
     String cypertextDataDec = "";
     cypertextDataDec.reserve(cypertextData.length());
 
-    uint8_t decimal = 0;
-    char temp[3]; // Temporary storage for each hex pair
+    // Tokenise on whitespace rather than stepping a fixed 3 characters. The
+    // writer below used to emit a single character for values under 0x10, so
+    // byte 0x08 was written "8" and every byte after it decoded one character
+    // out of phase — decryption then failed with an empty reply that looked
+    // exactly like a wrong password. Reading token by token recovers both the
+    // zero-padded form written now and every unpadded file already on disk.
+    for (int i = 0; i < (int)cypertextData.length();) {
+        while (i < (int)cypertextData.length() && isspace((unsigned char)cypertextData[i])) i++;
+        if (i >= (int)cypertextData.length()) break;
 
-    for (int i = 0; i < cypertextData.length(); i += 3) {
-        // Converts two characters hex to a single byte
-
-        uint8_t highNibble = hexCharToDecimal(cypertextData[i]);
-        uint8_t lowNibble = hexCharToDecimal(cypertextData[i + 1]);
-        decimal = (highNibble << 4) | lowNibble;
-
-        // Serial.println((char) decimal);
-
-        // cypertextDataDec += decimal;
-        // cypertextDataDec_index += 1;
-
-        // temp[0] = cypertextData[i];        // First hex nibble
-        // temp[1] = cypertextData[i + 1];    // Second hex nibble
-        // temp[2] = '\0';                // Null-terminate the string
-
-        // Convert the hex pair to a byte (char)
-        // char decimal = (char) strtol(temp, NULL, 16);
-        /*
-        cypertextDataDec[i/3] = decimal;
-        */
+        uint8_t decimal = hexCharToDecimal(cypertextData[i++]);
+        if (i < (int)cypertextData.length() && !isspace((unsigned char)cypertextData[i])) {
+            decimal = (decimal << 4) | hexCharToDecimal(cypertextData[i++]);
+        }
         cypertextDataDec += (char)decimal;
-        // Serial.println(decimal);
     }
 
     // Serial.println(cachedPassword);
@@ -159,7 +148,15 @@ String encryptString(String &plaintext, const String &password_str) {
     String dataStr = xorEncryptDecryptMD5(plaintext, password_str, 10);
     String dataStrHex = "";
 
-    for (size_t i = 0; i < dataStr.length(); i++) dataStrHex += String(dataStr[i], HEX) + " ";
+    // Zero-pad to two characters. Without this, values under 0x10 emit a single
+    // character and desynchronise a fixed-stride reader (see readDecryptedFile).
+    // The uint8_t cast also stops a char over 0x7F sign-extending into a
+    // multi-character hex string.
+    for (size_t i = 0; i < dataStr.length(); i++) {
+        uint8_t byte = (uint8_t)dataStr[i];
+        if (byte < 0x10) dataStrHex += "0";
+        dataStrHex += String(byte, HEX) + " ";
+    }
     dataStrHex.toUpperCase();
     dataStrHex.trim();
 

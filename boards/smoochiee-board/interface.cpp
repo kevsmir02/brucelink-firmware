@@ -12,6 +12,11 @@
 #include <Wire.h>
 #include <XPowersLib.h>
 XPowersPPM PPM;
+// PPM.init() result, kept because the board profile declares a BQ25896 that is
+// not necessarily fitted. Without this every battery read hammered a chip that
+// was not there — roughly ten "i2c_master_transmit failed: ESP_ERR_INVALID_STATE"
+// lines every 22 s, forever, drowning the console the panic handler shares.
+static bool pmu_present = false;
 #endif
 
 void _setup_gpio() {
@@ -37,6 +42,8 @@ void _setup_gpio() {
     bool pmu_ret = false;
     Wire.begin(SYS_I2C_SDA, SYS_I2C_SCL);
     pmu_ret = PPM.init(Wire, SYS_I2C_SDA, SYS_I2C_SCL, BQ25896_SLAVE_ADDRESS);
+    pmu_present = pmu_ret;
+    if (!pmu_ret) Serial.println("[PMU] BQ25896 not detected — battery readings disabled");
     if (pmu_ret) {
         PPM.setSysPowerDownVoltage(3300);
         PPM.setInputCurrentLimit(3250);
@@ -54,10 +61,18 @@ void _setup_gpio() {
 }
 bool isCharging() {
     // PPM.disableBatterPowerPath();
+    if (!pmu_present) return false;
     return PPM.isCharging();
 }
 
 int getBattery() {
+    // Return the existing clamp rather than a sentinel: callers assign this to a
+    // uint8_t (display.cpp:947, BatteryService.cpp:16), so a negative value would
+    // render as 255%. Reporting the *absence* of a battery needs a new entry in
+    // interface.h, which all 24 board implementations would have to provide — see
+    // KNOWN_ISSUES ISSUE-3. What this guard does fix is the I2C error storm.
+    if (!pmu_present) return 1;
+
     int voltage = PPM.getBattVoltage();
     int percent = (voltage - 3300) * 100 / (float)(4150 - 3350);
 

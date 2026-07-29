@@ -14,6 +14,12 @@
 
 #define DEF_DELAY 100
 
+// How long to wait for a USB host to enumerate before giving up. Bounded on
+// purpose: on a board built with ARDUINO_USB_MODE=1 TinyUSB never runs and
+// tud_mounted() can never become true, so an unbounded wait hangs the serial
+// task — the app's only command surface — until someone reaches the reset button.
+#define USB_HID_MOUNT_TIMEOUT_MS 8000
+
 int currentOutputY = 0;
 
 #if !defined(USB_as_HID)
@@ -655,9 +661,36 @@ void ducky_startKb(HIDInterface *&hid, bool ble, int functionId) {
             hid = new USBHIDKeyboard();
             USB.begin();
 
-            while (!tud_mounted()) {
+            // Bounded, because this wait can never end on some builds. TinyUSB is
+            // only initialised when ARDUINO_USB_MODE=0; a board compiled with
+            // ARDUINO_USB_MODE=1 selects hardware JTAG CDC and tud_mounted() stays
+            // false forever. This runs on the serial task, which is the only
+            // command surface the companion app has, so spinning here wedged the
+            // whole device with no way back except a physical reset. Time out and
+            // report instead: BadUSB still will not type, but the device survives
+            // and the caller gets its CLI back.
+            const uint32_t usbWaitStart = millis();
+            while (!tud_mounted() && (millis() - usbWaitStart) < USB_HID_MOUNT_TIMEOUT_MS) {
                 printStatusBadUSBBLE("Waiting USB Host...");
                 delay(500);
+            }
+
+            if (!tud_mounted()) {
+                // log_e, not Serial.println: on a board built with
+                // ARDUINO_USB_CDC_ON_BOOT the Arduino `Serial` object does not
+                // reach the port carrying the ESP-IDF console, so a printf here
+                // is invisible to anyone debugging (the same trap as ISSUE-2).
+                log_e("USB host did not enumerate in %u ms - is TinyUSB active on this build?",
+                      (unsigned)USB_HID_MOUNT_TIMEOUT_MS);
+                printStatusBadUSBBLE("USB HID unavailable");
+                delay(1000);
+                // Hand back a null so callers do not type into a keyboard that was
+                // never begun. Without this, key_input() drives sendReport() on an
+                // uninitialised HID and floods the console with
+                // "TX Semaphore is NULL" once per keystroke while typing nothing.
+                delete hid;
+                hid = nullptr;
+                return;
             }
 
             printStatusBadUSBBLE("USB Host Connected");
@@ -806,6 +839,13 @@ EXIT:
 // ============================================================================
 
 void key_input(FS fs, const String &bad_script, HIDInterface *_hid) {
+    // Single guard for all nine ducky_startKb() call sites: the keyboard may have
+    // failed to start (no USB host enumerated), in which case _hid is null and
+    // every dereference below would fault.
+    if (_hid == nullptr) {
+        log_e("key_input: no HID interface - keyboard was never started");
+        return;
+    }
     if (!fs.exists(bad_script) || bad_script == "") return;
     File payloadFile = fs.open(bad_script, "r");
     if (!payloadFile) return;
