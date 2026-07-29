@@ -194,7 +194,7 @@ limitation, so it is the better target.
 
 ### ISSUE-2 — `settings` with no arguments returns nothing over BLE
 
-**Status:** OPEN · **Severity:** low · **Verified** 2026-07-29
+**Status:** RESOLVED in `b1c825c8` · **Severity:** low · **Verified** 2026-07-29
 
 `settings` with no arguments is documented as "View all the current settings", but
 over BLE it returns 5 bytes — `\r\n` plus the `# ` prompt plus EOT — and no JSON.
@@ -209,11 +209,15 @@ Single-field reads are unaffected: `settings bright` → `bright = 100`.
 
 **Fix:** `Serial` → `*serialDevice` in that one call.
 
+**Fix (`b1c825c8`).** Serialise to a `String` and print it to `*serialDevice`.
+Verified 2026-07-29 on ELF `4bdcd1dc364fd2cf`: `settings` over BLE returns **1,917
+bytes** of config JSON with `eot=True`, where it previously returned 5.
+
 ---
 
 ### ISSUE-3 — `battery_pct` and `charging` are fabricated with no PMU fitted
 
-**Status:** OPEN · **Severity:** medium (blocks any battery UI) · **Verified** 2026-07-29
+**Status:** PARTIALLY FIXED in `b1c825c8` (I²C storm gone; reporting still wrong) · **Severity:** medium (blocks any battery UI) · **Verified** 2026-07-29
 
 `getBattery()` and `isCharging()` call `PPM.*` unconditionally, ignoring the
 `pmu_ret` result of `PPM.init()` (`boards/smoochiee-board/interface.cpp:38-75`). With
@@ -230,6 +234,23 @@ rather than a cosmetic one once fitted — the guard should be added regardless.
 
 **Fix:** store `pmu_ret` and return a sentinel (or omit the fields) when the PMU is
 absent.
+
+**Partial fix (`b1c825c8`).** `PPM.init()`'s result is now stored and both
+`getBattery()` and `isCharging()` return early when no PMU is fitted.
+
+*What this fixed:* the console storm. Roughly ten
+`i2c_master_transmit failed: ESP_ERR_INVALID_STATE` lines every 22 s, forever, on the
+same port a panic backtrace has to appear on. Verified 2026-07-29: **0 bytes** of
+console output across a 55 s idle capture, against ~25 expected before.
+`isCharging()` also now correctly reports `false` instead of `true`.
+
+*What is still wrong:* `battery_pct` still reports `1`. A sentinel was rejected
+deliberately — `getBattery()` is assigned to a `uint8_t` at `display.cpp:947` and
+`BatteryService.cpp:16`, so `-1` would render as **255%**. Reporting the absence
+honestly needs a `batteryPresent()` (or equivalent) in `include/interface.h`, which
+all **24** board implementations would then have to provide. That is a cross-board
+change, not a quick win, and it is not done. **The app must still not show a battery
+UI.**
 
 ---
 
@@ -349,7 +370,7 @@ emit a `ble_result`-style outcome frame where it does not.
 
 ### ISSUE-10 — `blespam samsung` transmits Galaxy Buds packets with no Flags AD structure
 
-**Status:** OPEN · **Severity:** low · **Verified** 2026-07-29 · **Pre-existing,
+**Status:** RESOLVED in `b1c825c8` · **Severity:** low · **Verified** 2026-07-29 · **Pre-existing,
 unrelated to `c9c43c03`** · **Console capture, 30/30 packets**
 
 The Galaxy Buds payload fills the entire advert budget on its own, and the flags the
@@ -372,6 +393,14 @@ malformed-advert issue, not a no-op like ISSUE-8 was.
 **Not caused by the ISSUE-8/9 fix**: `c9c43c03` touches teardown and the MAC snapshot,
 not the per-packet build. **Not verified** whether the missing flags actually affect
 whether a handset shows the popup.
+
+**Fix (`b1c825c8`).** `setFlags(0x06)` now runs only on the Galaxy Watch branch,
+whose 15-byte payload leaves room for it. The Buds branch omits it — real Galaxy Buds
+advertise no Flags structure either, so this is also the more faithful packet.
+Verified 2026-07-29: `blespam samsung 30` produced **0** `Data length exceeded`
+(was 30/30), and a capture during `blespam samsung 60` still shows the payload on air
+under company ID 117 (`42098102141503210109d3070104063c948e00000000c700`) — removing
+the flags did not stop transmission.
 
 ---
 
@@ -480,7 +509,7 @@ is real and the trap — testing from a dirty baseline — is easy to repeat.
 
 ### ISSUE-13 — `encrypt` then `decrypt` fails ~62% of the time, silently
 
-**Status:** OPEN · **Severity:** high (silent data loss to the user's eye) ·
+**Status:** RESOLVED in `b1c825c8` · **Severity:** high (silent data loss to the user's eye) ·
 **Verified** 2026-07-29 · **Root cause proven, falsifiable test 8/8**
 
 A file written by `encrypt` often cannot be read back by `decrypt` on the same device
@@ -537,11 +566,22 @@ files unreadable, so the reader should be fixed regardless.
 passes (`Algo: XOR`, `KeyDerivationAlgo: MD5` in the file header). It is obfuscation,
 not encryption, and the app should not present it as the latter.
 
+**Fix (`b1c825c8`).** Both ends. `encryptString` zero-pads to two characters and
+casts through `uint8_t` (which also stops a byte over 0x7F sign-extending into a
+multi-character token); `readDecryptedFile` tokenises on whitespace instead of
+stepping a fixed three. **The reader fix is the important one** — it recovers every
+unpadded file already on disk, which padding the writer alone would have left
+unreadable.
+Verified 2026-07-29 with `tools/ble_spike/cryptotest.py`: **8/8 payloads round-trip**,
+`short tokens []` empty for every one. Before: 5 of 8 failed.
+Still XOR with an MD5-derived key — obfuscation, not encryption. The app should not
+present it as the latter.
+
 ---
 
 ### ISSUE-14 — `settings <field> <value>` silently does nothing for most fields
 
-**Status:** OPEN · **Severity:** high (writes report success and change nothing) ·
+**Status:** RESOLVED in `b1c825c8` · **Severity:** high (writes report success and change nothing) ·
 **Verified** 2026-07-29 · **Tested against a control**
 
 `settingsCallback` validates the field name against `bruceConfig.toJson()`, but only
@@ -568,6 +608,20 @@ a name that is absent from the JSON produces an error. The app cannot tell a wri
 that took effect from one that did not.
 
 `bleApiAutoStart` being unwritable is what makes ISSUE-12 untestable from the CLI.
+
+**Fix (`b1c825c8`).** The branches are now an `else if` chain with a `written`
+flag. An unmatched field reports `Read-only setting, not writable from the CLI:
+<name>` and returns false; a successful write echoes `<name> = <value>` instead of
+staying silent.
+Verified 2026-07-29:
+
+```
+settings bleApiAutoStart 0  ->  Read-only setting, not writable from the CLI: bleApiAutoStart
+settings bleApiAutoStart    ->  bleApiAutoStart = 1      <- provably unchanged
+settings bright 60          ->  bright = 60
+settings bright             ->  bright = 60              <- provably changed
+settings nosuchfield 1      ->  Invalid field name: nosuchfield
+```
 
 ---
 
@@ -862,7 +916,7 @@ the device — not to offer a cancel button that cannot work.
 
 ### ISSUE-20 — `badusb` cannot work on this build and hangs the device forever
 
-**Status:** OPEN · **Severity:** critical (unrecoverable hang; and it retires a
+**Status:** PARTIALLY FIXED in `b1c825c8` (hang gone; BadUSB still cannot type) · **Severity:** critical (unrecoverable hang; and it retires a
 capability previously believed shippable) · **Verified** 2026-07-29 ·
 **Root cause fully code-verified**
 
@@ -937,6 +991,36 @@ the more interesting option anyway since it needs no cable to the target.
    cost**: the hardware JTAG CDC console is how panic backtraces are captured on this
    board (see ISSUE-1's decode), so changing it affects the primary debugging channel.
    Not a change to make casually.
+
+**Partial fix (`b1c825c8`).** The wait is now bounded at
+`USB_HID_MOUNT_TIMEOUT_MS` (8 s). On timeout the handle is deleted and nulled, and
+`key_input()` gained a single null guard covering all nine `ducky_startKb()` call
+sites rather than a check at each.
+
+*What this fixed:* the unrecoverable hang. Verified 2026-07-29 on ELF
+`4bdcd1dc364fd2cf` — `badusb run_from_file bl_ducky.txt` returns in **9.3 s** with
+`eot=True` and the device stays responsive, where it previously spun forever and took
+the serial task, the app's only command surface, with it. The `TX Semaphore is NULL`
+flood that the first attempt at this fix exposed went from **60 occurrences to 0**.
+
+The console now says why, which it could not before — the original diagnostic used
+`Serial.println`, and on a board built with `ARDUINO_USB_CDC_ON_BOOT` that does not
+reach the port carrying the ESP-IDF console (the same trap as ISSUE-2). Switched to
+`log_e`:
+
+```
+[E][ducky_typer.cpp:683] ducky_startKb(): USB host did not enumerate in 8000 ms - is TinyUSB active on this build?
+[E][ducky_typer.cpp:846] key_input(): no HID interface - keyboard was never started
+```
+
+**This also upgrades the root cause from code-reading to observation:** the timeout
+branch fires, so `tud_mounted()` genuinely never becomes true on this build.
+
+*What is still wrong:* **BadUSB over USB HID still cannot type anything.** That needs
+`ARDUINO_USB_MODE=0`, which would give up the hardware JTAG CDC console this board
+relies on — a board-configuration trade-off, not a bug fix. The BLE-HID branch
+(`ducky_startKb(..., ble=true)`) is a different path that never touches TinyUSB and
+remains **untested**.
 
 ---
 

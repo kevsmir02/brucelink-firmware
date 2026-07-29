@@ -12,7 +12,7 @@ measurement (device + date) or a code fact (`file:line`). Nothing here is inferr
 
 **Hardware under test:** bare ESP32‑S3‑N16R8 devkit, 1.47" 172×320 IPS LCD on SPI,
 five buttons, USB powered. No PMU, SD, CC1101, NRF24, PN532, IR or GPS. Env
-`smoochiee-board`. Firmware `31a1bae7`, ELF `b02178b485345ef7`.
+`smoochiee-board`. Firmware `b1c825c8`, ELF `4bdcd1dc364fd2cf`.
 
 ---
 
@@ -42,6 +42,10 @@ Verified end-to-end on hardware, safe to expose as a one-tap action.
 | `blespam samsung` / `windows` / `ibeacon` | Transmit correctly; name/UUID/BT-MAC now survive (`c9c43c03`). `samsung` drops its Flags AD structure (ISSUE-10, cosmetic). |
 | Read/control verbs | `systeminfo`, `free`, `uptime`, `ls`, `cat`, `md5`, `crc32`, `storage stat/copy/rename/write`, `mkdir`, `rmdir`, `rm`, `i2c`, `loader list/open`, `webui -bg/-off`, `reboot` |
 | `gpio` read/mode/set | Pins **47/48 only** on this board. Empty reply = success. |
+| `settings` (read all) | Returns 1,917 B of JSON over BLE (`b1c825c8`). |
+| `settings <field> <value>` | Confirms the write, or says the field is read-only (`b1c825c8`). |
+| `encrypt` / `decrypt` | Round-trip 8/8 (`b1c825c8`). XOR+MD5 — obfuscation, not encryption. |
+| `blespam samsung` | Flags no longer overflow; 0 errors per 30 packets (`b1c825c8`). |
 | `screen brightness` | Takes **0–255**, not 0–100. |
 | BLE transport | Framing, EOT, chunking, event characteristic, gap-free event IDs, boot persistence. |
 | HTTP `POST /cm` + auth | Cookie and 401 paths verified. AP gateway is **172.0.0.1**. |
@@ -53,9 +57,8 @@ Verified end-to-end on hardware, safe to expose as a one-tap action.
 |---|---|---|
 | `deauth` | Crashes the device (SPI mutex, cross-task) | ISSUE-1 |
 | `evilportal` | Crashes **under load**, same assertion; and cannot serve its own page | ISSUE-1, ISSUE-21 |
-| `badusb` (USB HID) | Types nothing, hangs the device forever, needs a physical reset | ISSUE-20 |
-| `encrypt`/`decrypt` | Round-trip fails ~62% of the time, silently | ISSUE-13 |
-| `settings <field> <value>` | Silent no-op for all but 14 fields, reports success | ISSUE-14 |
+| `badusb` (USB HID) | Types nothing. No longer hangs — returns in 9.3 s (`b1c825c8`) | ISSUE-20 |
+| `badusb` (BLE HID) | **Untested** — different branch, may work | ISSUE-20 |
 | `js` output/errors | Interpreter runs, but no return channel at all | ISSUE-15 |
 | `rf rx`, `md5`/`stat` on a missing file | Silent failure, empty reply | ISSUE-13 §context |
 | `rf selftest`, `nrf24`, `gps`, `getscreen` | Not registered in this build | — |
@@ -69,7 +72,7 @@ Verified end-to-end on hardware, safe to expose as a one-tap action.
 | WebUI margin is ~18 KB | Starts from a clean boot; fails silently if anything consumed heap first (ISSUE-12). A JS run alone is enough to break it (ISSUE-17). |
 | Discover by service UUID, never by name | `4371ec0b-3d43-49f9-b731-7c72a4a7bb91`. |
 | BLE replies can truncate silently | No `[TRUNCATED]` marker. Treat a missing EOT as "retry" (ISSUE-16). Hash files, don't eyeball listings. |
-| No battery UI | `battery_pct` permanently 1 (ISSUE-3). |
+| No battery UI | `battery_pct` still permanently 1 (ISSUE-3 partial — the I²C storm is fixed, the reporting is not). |
 | Never gate on `capabilities` | Compile-time flags (ISSUE-4). |
 | `POST /login` writes flash every time | And can abort the device under load (ISSUE-18). |
 
