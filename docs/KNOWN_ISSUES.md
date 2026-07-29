@@ -309,13 +309,104 @@ emit a `ble_result`-style outcome frame where it does not.
 
 ---
 
+### ISSUE-10 — `blespam samsung` transmits Galaxy Buds packets with no Flags AD structure
+
+**Status:** OPEN · **Severity:** low · **Verified** 2026-07-29 · **Pre-existing,
+unrelated to `c9c43c03`** · **Console capture, 30/30 packets**
+
+The Galaxy Buds payload fills the entire advert budget on its own, and the flags the
+caller then adds do not fit, so they are silently discarded on every packet.
+
+`Buds_Data[31]` is filled to all 31 bytes and passed to `AdvData.addData(Buds_Data, bi)`,
+after which the shared tail of the case does `AdvData.setFlags(0x06)` — a 3-byte AD
+structure that takes the total to 34. NimBLE rejects it and logs. Captured on
+`/dev/ttyACM0` during `blespam samsung 30`:
+
+```
+E NimBLEAdvertisementData: Data length exceeded      x30
+```
+
+Exactly one per packet, because the CLI path pins `device_index = 0` (Galaxy Buds) so
+every packet takes the buds branch. The 31-byte payload itself still transmits — the
+earlier packet capture did see Samsung company-ID 117 adverts — so this is a
+malformed-advert issue, not a no-op like ISSUE-8 was.
+
+**Not caused by the ISSUE-8/9 fix**: `c9c43c03` touches teardown and the MAC snapshot,
+not the per-packet build. **Not verified** whether the missing flags actually affect
+whether a handset shows the popup.
+
+---
+
+### ISSUE-11 — one unexplained reboot during a back-to-back spam sweep, not reproduced
+
+**Status:** OPEN · **Severity:** unknown · **Observed once** 2026-07-29 · **No console
+capture of the event** · **Not reproduced in 2 subsequent attempts**
+
+During the first post-fix verification sweep the device rebooted once. It was detected
+after the fact, not observed: `uptime` read `00:01:00` with `free` reporting
+`t=60638ms`, when at least ~300 s of testing had run since the flash. Every later
+reading was monotonic, so the reset happened during that sweep and not since.
+
+**No USB console was being captured at the time**, so there is no backtrace and no
+reset reason. Two deliberate reproduction attempts with `/dev/ttyACM0` captured
+throughout — a five-verb sweep, and a FastPair run followed by a five-verb sweep —
+both ran clean, with `millis()` continuous and no `rst:0x` / `Backtrace:` /
+`assert failed` markers.
+
+**Do not read this as fixed or as caused by `c9c43c03`; neither is established.** It
+is recorded because a one-off reset that is not understood is worth recognising if it
+recurs. Next step if it does: keep `usbwatch2.py` running for the whole session so the
+event is captured rather than inferred.
+
+---
+
+## Cosmetic / upstream
+
+Recorded because they appear on every boot and are easy to mistake for real faults
+when reading a console capture.
+
+- `[E][esp32-hal-gpio.c:185] __digitalWrite(): IO 6 is not set as GPIO. Execute digitalMode(6, OUTPUT) first.`
+  — TFT backlight pin, once per boot. Harmless.
+- `[E][sd_diskio.cpp:761] sdcard_mount(): f_mount failed: (3)` ×2 — no SD card fitted.
+- `[E][vfs_api.cpp:33] open(): does not start with /` then
+  `THEME: Theme file not found. Using default theme` — no theme file on LittleFS.
+- `[E][STA.cpp:540] disconnect(): STA disconnect failed! 0x3001: ESP_ERR_WIFI_NOT_INIT`
+  — emitted by the `wifi_atk_unsetWifi()` path when WiFi was never initialised.
+- `webui -bg` prints `Press ESC to quit` even though it returns immediately. Stale
+  text inherited from the foreground path; the command does return.
+
+---
+
+## Verified working
+
+Recorded so nobody "fixes" these, and so a regression is recognisable. All measured
+on the hardware above, 2026-07-29, over the BLE CLI characteristic unless stated.
+
+| Behaviour | Evidence |
+|---|---|
+| BLE API re-arms itself at boot | Boot log: `[BLE_API] setup: adv start=1 isAdvertising=1` at `t=8593ms`, after `before-wifi-init` at `t=999ms`. `settings bleApiAutoStart` → `1`. Survived an unplanned crash-reboot. |
+| BLE API memory cost ~62 KB | RAMLOG across the transition: `ble-api pre-setup` heap 145,503 / largest 69,620 → `post-setup` heap 81,703 / largest 31,732. |
+| Dispatch ACK for blocking verbs | `COMMAND: deauth` event frame arrives 40–50 ms after the write, before `parse()` runs. Confirmed on a verb that then blocked indefinitely. |
+| `[CLI] Result:` withheld while blocked | Absent for the entire block in both runs. |
+| BLE cannot rescue a blocking verb | 4 commands (run 1) and 2 (run 2) written during the block: accepted at the GATT layer, never parsed. |
+| Event/CLI stream separation | Event JSON never appeared on the CLI characteristic across a 3-command capture. |
+| Event IDs monotonic, gap-free | ids 61→66 across three commands. |
+| `webui -bg` / `webui -off` | `-bg` returned in 357 ms without holding the screen; `-off` returned `WebUI stopped` and reclaimed memory (DMA largest 6,900 → 19,444). |
+| Simultaneous BLE + AP + WebUI | `systeminfo` answered over BLE with the AP up; free heap 14,951, DMA largest 6,900. |
+| `RADIO_BLE_MIN_DMA_BLOCK` = 15 KB | `radio_mem.h:32`. |
+| Menu exit paths | `loopOptions` breaks on `check(EscPress)` for non-main menus (`display.cpp:647`); `addOptionToMainMenu()` also pushes a `Main Menu` option calling `backToMenu()` (`utils.cpp:27-30`). Either works. |
+
+---
+
+## Resolved
+
 ### ISSUE-8 — `blespam fastpair_*` emits malformed adverts and produces no popups
 
-**Status:** OPEN · **Severity:** high (the verb's **default** type is a no-op) ·
-**Verified** 2026-07-29 · **Reproduced 4/4, confirmed by packet capture**
+**Status:** RESOLVED in `c9c43c03` · **Severity was:** high (the verb's **default**
+type was a no-op) · **Verified** 2026-07-29 · **Fix proven on hardware** 2026-07-29
 
-`blespam fastpair_regular` transmits nothing a phone will act on. Confirmed
-end-to-end against real handsets, and the cause is a container mismatch in the
+`blespam fastpair_regular` transmitted nothing a phone would act on. Confirmed
+end-to-end against real handsets, and the cause was a container mismatch in the
 payload, not a tuning problem.
 
 **Proven over the air.** A BLE sniffer on a laptop captured what the device actually
@@ -391,14 +482,37 @@ Fast Pair notifications are simply off** — which is a phone-side condition, no
 firmware fault, and `blespam android` should be considered working at the radio
 level. `fastpair_*` transmitted zero valid adverts under identical conditions.
 
+**Fix (`c9c43c03`).** Build the advert with `NimBLEAdvertisementData::addData()` +
+`setAdvertisementData()` instead of `setManufacturerData()`, matching the path that
+was already working. Root cause confirmed by direct comparison, not inference:
+`createFastPairAdvertisement` (`BLE_Suite.cpp:3670`) emits a buffer **byte-for-byte
+identical** to `Google_Data[14]` in `GetUniversalAdvertisementData`
+(`ble_spam.cpp:311-330`), differing only in the Tx power value. Same bytes, different
+container, opposite result on air.
+
+**Proving test** (bare devkit, 2026-07-29, `sniff2.py "blespam fastpair_regular 400" 30`,
+run twice on the fixed binary):
+
+```
+service-data UUIDs seen:   0xfe2c  x13        (first run)
+service-data UUIDs seen:   0xfe2c  x8         (second run, after rebuild)
+manufacturer company IDs:  0x0303 absent from both
+samples: sd={'fe2c': '000047'} / '00000a' / '0000f0' / '000048' / '000006'
+```
+
+Before the fix the same command produced **0** adverts carrying 0xFE2C service data
+and 7 carrying company ID 0x0303. The 3-byte service-data payloads are model IDs and
+they vary across the model list, as intended.
+
 ---
 
 ### ISSUE-9 — after some `blespam` types the device advertises without its name or service UUID
 
-**Status:** OPEN · **Severity:** high (the app cannot reconnect) · **Verified** 2026-07-29
+**Status:** RESOLVED in `c9c43c03` · **Severity was:** high (the app could not
+reconnect) · **Verified** 2026-07-29 · **Fix proven on hardware** 2026-07-29
 
-After `blespam ibeacon`, `samsung` or `windows`, the device stops advertising as
-`Bruc`. It is **not** stranded — the BLE API resumes correctly and the device stays
+After `blespam ibeacon`, `samsung` or `windows`, the device stopped advertising as
+`Bruc`. It was **not** stranded — the BLE API resumes correctly and the device stays
 fully responsive — but its advertisement loses both the local name and the service
 UUID, so any client discovering by name cannot find it.
 
@@ -462,46 +576,44 @@ characteristic, which is how this was diagnosed.
 the radio back (and restore the original BT MAC), so `bleApi.setup()` starts from an
 empty advertisement.
 
+**Fix (`c9c43c03`).** Two separate defects on the same path.
+
+*The dropped name and UUID.* Root cause confirmed in the library source, upgrading the
+earlier arithmetic to proof: `NimBLEDevice::deinit(bool clearAll = false)` only deletes
+`m_bleAdvertising` inside `if (clearAll)`. `bleSpamDeinitAdvertiser` called the
+one-argument form, so the advertising singleton and its `m_advData` survived and
+`bleApi.setup()` appended the name and service UUID on top of the spam remnant.
+`pAdvertising->clearData()` is now called at teardown. `clearData()` was chosen over
+switching to `deinit(true)` because it zeroes `m_advData`/`m_scanData` and nothing
+else, whereas `deinit(true)` would also delete `m_pServer`.
+
+Corroborating: `BLEStateManager::deinitBLE()` (`BLE_Suite.cpp:327`) already calls
+`deinit(true)`, which is why the FastPair engine never showed this symptom.
+
+*The leaked BT MAC.* **Both** engines rotate the address and neither restored it —
+`ble_spam.cpp`'s `bleSpamRestartAdvertiserForMac` and `BLE_Suite.cpp`'s
+`fastPairRotateAddress`. The first fix attempt covered only `ble_spam.cpp` and the
+gap was caught by the test below, which showed FastPair still leaking. Each engine now
+snapshots the factory address before its first override and restores it on teardown.
+
+**Proving test** (bare devkit, 2026-07-29). Discovery deliberately by **service UUID**,
+never by name, so a missing name is reported as a finding rather than as a missing
+device — the harness failure that caused this entry's original wrong diagnosis:
+
+```
+type               name     service UUID   BT MAC
+apple              Bruc     present        1C:DB:D4:5E:D7:39 -> unchanged
+android            Bruc     present        1C:DB:D4:5E:D7:39 -> unchanged
+samsung            Bruc     present        1C:DB:D4:5E:D7:39 -> unchanged
+windows            Bruc     present        1C:DB:D4:5E:D7:39 -> unchanged
+ibeacon            Bruc     present        1C:DB:D4:5E:D7:39 -> unchanged
+fastpair_regular   Bruc     present        1C:DB:D4:5E:D7:39 -> unchanged
+```
+
+All six pass, where `samsung`, `windows` and `ibeacon` previously lost the name and
+every type previously leaked the MAC. Two full back-to-back sweeps were run with
+`/dev/ttyACM0` captured throughout: no panic, no reset, `millis()` continuous
+(150s->285s and 431s->592s), and heap returning to ~81,000 with the DMA block at
+31,732 after every single run.
+
 ---
-
-## Cosmetic / upstream
-
-Recorded because they appear on every boot and are easy to mistake for real faults
-when reading a console capture.
-
-- `[E][esp32-hal-gpio.c:185] __digitalWrite(): IO 6 is not set as GPIO. Execute digitalMode(6, OUTPUT) first.`
-  — TFT backlight pin, once per boot. Harmless.
-- `[E][sd_diskio.cpp:761] sdcard_mount(): f_mount failed: (3)` ×2 — no SD card fitted.
-- `[E][vfs_api.cpp:33] open(): does not start with /` then
-  `THEME: Theme file not found. Using default theme` — no theme file on LittleFS.
-- `[E][STA.cpp:540] disconnect(): STA disconnect failed! 0x3001: ESP_ERR_WIFI_NOT_INIT`
-  — emitted by the `wifi_atk_unsetWifi()` path when WiFi was never initialised.
-- `webui -bg` prints `Press ESC to quit` even though it returns immediately. Stale
-  text inherited from the foreground path; the command does return.
-
----
-
-## Verified working
-
-Recorded so nobody "fixes" these, and so a regression is recognisable. All measured
-on the hardware above, 2026-07-29, over the BLE CLI characteristic unless stated.
-
-| Behaviour | Evidence |
-|---|---|
-| BLE API re-arms itself at boot | Boot log: `[BLE_API] setup: adv start=1 isAdvertising=1` at `t=8593ms`, after `before-wifi-init` at `t=999ms`. `settings bleApiAutoStart` → `1`. Survived an unplanned crash-reboot. |
-| BLE API memory cost ~62 KB | RAMLOG across the transition: `ble-api pre-setup` heap 145,503 / largest 69,620 → `post-setup` heap 81,703 / largest 31,732. |
-| Dispatch ACK for blocking verbs | `COMMAND: deauth` event frame arrives 40–50 ms after the write, before `parse()` runs. Confirmed on a verb that then blocked indefinitely. |
-| `[CLI] Result:` withheld while blocked | Absent for the entire block in both runs. |
-| BLE cannot rescue a blocking verb | 4 commands (run 1) and 2 (run 2) written during the block: accepted at the GATT layer, never parsed. |
-| Event/CLI stream separation | Event JSON never appeared on the CLI characteristic across a 3-command capture. |
-| Event IDs monotonic, gap-free | ids 61→66 across three commands. |
-| `webui -bg` / `webui -off` | `-bg` returned in 357 ms without holding the screen; `-off` returned `WebUI stopped` and reclaimed memory (DMA largest 6,900 → 19,444). |
-| Simultaneous BLE + AP + WebUI | `systeminfo` answered over BLE with the AP up; free heap 14,951, DMA largest 6,900. |
-| `RADIO_BLE_MIN_DMA_BLOCK` = 15 KB | `radio_mem.h:32`. |
-| Menu exit paths | `loopOptions` breaks on `check(EscPress)` for non-main menus (`display.cpp:647`); `addOptionToMainMenu()` also pushes a `Main Menu` option calling `backToMenu()` (`utils.cpp:27-30`). Either works. |
-
----
-
-## Resolved
-
-*(none yet — move entries here with the fixing commit and the test that proves it)*

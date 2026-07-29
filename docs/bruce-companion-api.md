@@ -6,9 +6,11 @@ earlier design note disagrees with what is written here, the code wins. See
 and [KNOWN_ISSUES.md](./KNOWN_ISSUES.md) for verified defects — read that before
 planning against any verb; this document covers *what the interface is*.
 
-**Contract version:** 2.1 — audited against `0b2073fa`, re-verified on hardware
-2026-07-29. Fork point from upstream Bruce: `59e83bfb` (2026-07-23); companion work
-starts at `373fb5d8` (2026-07-25). Bump this line whenever the contract changes.
+**Contract version:** 2.2 — audited against `0b2073fa`, re-verified on hardware
+2026-07-29 against `c9c43c03`, which fixed the `fastpair_*` no-op and the lost
+name/UUID/BT-MAC after a spam (§5.1). Fork point from upstream Bruce: `59e83bfb`
+(2026-07-23); companion work starts at `373fb5d8` (2026-07-25). Bump this line
+whenever the contract changes.
 
 **Line numbers drift.** Every citation below was re-checked at `0b2073fa` and points
 at real code, but a citation is a pointer, not a guarantee — grep for the symbol if
@@ -278,7 +280,7 @@ needs both answers, so they are now separate columns.
 | `free` | no | immediately | — | one-line heap report incl. **largest contiguous DMA block**, which is what actually gates radio init |
 | `webui -off` | no | immediately | — | stops the WebUI **and its AP**; frees the memory for BLE. Verified 2026-07-29 |
 | `webui -bg` | no | immediately | — | starts the WebUI and returns instead of holding the screen. Returned in 357 ms, 2026-07-29. Still prints "Press ESC to quit" — stale text, it does return |
-| `blespam <type> <count>` | no | **after the burst** | `state`, `ble_progress`, `ble_result` — but see below | self-completing, verified 5/5. **Use `apple`, not the `fastpair_*` default** (§5.1, ISSUE-8). Suspends the BLE link for **0.5–11.9 s** (measured); tolerate ~12 s. Types in §5.1; count < 1 → 10 |
+| `blespam <type> <count>` | no | **after the burst** | `state`, `ble_progress`, `ble_result` — but see below | self-completing, verified 5/5. `fastpair_*` fixed in `c9c43c03` (§5.1). Suspends the BLE link for **0.5–11.9 s** (measured); tolerate ~12 s. Types in §5.1; count < 1 → 10 |
 | `evilportal <ssid> <ch> [template]` | **YES** | **only after dismissal** | ✅ `state: portal` | defaults: ssid `Free Wifi`, ch `6` (out-of-range → 6); gateway forced to `192.168.4.1`. Tested 2026-07-29: no crash in 100 s **idle**; `state` frame at +3.51 s. The only attack verb with usable telemetry. See §5.3 — no timeout, no remote stop |
 | `deauth [<target>]` | ☠️ **CRASHES THE DEVICE** | never — it panics | — | see below and KNOWN_ISSUES §ISSUE-1. `target` is parsed but ignored (`attack_commands.cpp:152`) |
 | `karma` | **YES** | only after dismissal | — | opens the TFT menu. Tested 2026-07-29: blocks, no crash in 90 s |
@@ -316,35 +318,38 @@ not `attack_commands.cpp`.
 Two engines behind one verb (`attack_commands.cpp:74`):
 
 - **FastPair popup engine:** `fastpair_regular`, `fastpair_fun`, `fastpair_prank`,
-  `fastpair_custom` — ⚠️ **BROKEN, produces no popups.** The payload is built as raw
-  AD structures and then handed to `setManufacturerData()`, which wraps it again, so
-  the advert is malformed. Verified against an Android and an iPhone on 2026-07-29:
-  60 adverts, zero popups, while `apple` produced a popup immediately. Since
-  `fastpair_regular` is this verb's **default** `type`, a bare `blespam` is a silent
-  no-op. See [KNOWN_ISSUES.md](./KNOWN_ISSUES.md) §ISSUE-8. **Default to `apple`.**
+  `fastpair_custom` — **fixed in `c9c43c03`**; transmits valid Fast Pair adverts.
+  It previously built the payload as raw AD structures and handed them to
+  `setManufacturerData()`, which wrapped them again, so the advert went out under
+  company ID 0x0303 and no scanner saw it — 60 adverts, zero popups on 2026-07-29.
+  Now packet-captured at 8–13 valid `0xFE2C` adverts per run. **Handset popups have
+  not been re-tested since the fix**; the test Android's Fast Pair notifications are
+  off, which is what made the original diagnosis ambiguous. Radio level verified,
+  handset level UNVERIFIED. See [KNOWN_ISSUES.md](./KNOWN_ISSUES.md) §ISSUE-8.
 - **Generic spam engine** (`bleSpamAttackTypeFromName`, `ble_spam.cpp:1592`):
   `apple`, `android`, `ibeacon`, `samsung`, `windows` (alias `swiftpair`),
-  `random` (alias `all`). **Only `apple` and `android` are safe to expose** — all
-  types were packet-captured on 2026-07-29:
+  `random` (alias `all`). All types were packet-captured on 2026-07-29 and
+  re-verified after `c9c43c03`:
 
   | Type | Transmits correctly | Still discoverable as `Bruc` after? |
   |---|---|---|
   | `apple` | ✅ company 76; iPhone showed "Setup New iPhone" | ✅ |
   | `android` | ✅ `0xFE2C` Fast Pair service data | ✅ |
-  | `ibeacon` | name-only advert, **not** an Apple iBeacon | ⚠️ **no** |
-  | `samsung` | ✅ company 117 | ⚠️ **no** |
-  | `windows` | ✅ company 6, "Generic Swift Pair" | ⚠️ **no** |
-  | `random` | selects across all types | ⚠️ inherits the risk |
+  | `ibeacon` | name-only advert, **not** an Apple iBeacon | ✅ (was ⚠️) |
+  | `samsung` | ✅ company 117, but see §ISSUE-10 | ✅ (was ⚠️) |
+  | `windows` | ✅ company 6, "Generic Swift Pair" | ✅ (was ⚠️) |
+  | `random` | selects across all types | ✅ |
 
-  The ⚠️ types leave the device **healthy and advertising, but without its name or
-  service UUID**, because the spam's advertisement payload is never cleared and the
-  31-byte budget overflows when the BLE API re-advertises. The device is still fully
-  reachable — connect by address, or match on the service UUID. The BT MAC also
-  changes across any spam. See [KNOWN_ISSUES.md](./KNOWN_ISSUES.md) §ISSUE-9.
+  Before `c9c43c03` the ⚠️ types left the device healthy and advertising but
+  **without its name or service UUID**, because the spam's advertisement payload was
+  never cleared and the 31-byte budget overflowed when the BLE API re-advertised. The
+  BT MAC was not restored either. Both are fixed and all six types now retain name,
+  service UUID and factory MAC. See [KNOWN_ISSUES.md](./KNOWN_ISSUES.md) §ISSUE-9.
 
-  **Do not discover by name alone.** Match on the service UUID
-  `4371ec0b-3d43-49f9-b731-7c72a4a7bb91`, which is the only stable identifier across
-  a spam.
+  **Still do not discover by name alone.** Match on the service UUID
+  `4371ec0b-3d43-49f9-b731-7c72a4a7bb91`. Name discovery now survives every type
+  tested, but the UUID is the cheaper invariant to rely on and it cost four bogus
+  "device is bricked" conclusions to learn that once.
 - **`menu`** — opens the interactive on-device UI and drives its own radio
   lifecycle (no transport swap)
 

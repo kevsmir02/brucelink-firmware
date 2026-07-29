@@ -144,7 +144,11 @@ Advertises as `Bruc`. Service `4371ec0b-…`, CLI characteristic `d555ed97-…`
   stdout. Events are dropped, not queued, when nobody is subscribed.
 - Teardown must use `NimBLEDevice::deinit(true)`. The default leaves services
   allocated, producing duplicate characteristics with the same UUID on each
-  arm/disarm cycle.
+  arm/disarm cycle. The same default is why `blespam` used to come back nameless:
+  `deinit(false)` also keeps the advertising payload, and `bleApi.setup()` then
+  appended the name and UUID on top of it until the 31-byte advert overflowed
+  (`c9c43c03`). Anything handing the radio back must leave the advert empty *and*
+  restore the BT MAC it rotated.
 
 ### Event stream (`src/core/wifi/ws_events.cpp`)
 
