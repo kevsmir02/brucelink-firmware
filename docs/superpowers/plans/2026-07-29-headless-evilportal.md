@@ -741,8 +741,8 @@ import sys
 from bleak import BleakClient, BleakScanner
 
 SVC = "4371ec0b-3d43-49f9-b731-7c72a4a7bb91"
-CLI = "d555ed97-3d43-49f9-b731-7c72a4a7bb91"
-EVT = "d555ed98-3d43-49f9-b731-7c72a4a7bb91"
+CLI = "d555ed97-bf2a-4f46-b3eb-d1fcdd7325e9"
+EVT = "d555ed98-bf2a-4f46-b3eb-d1fcdd7325e9"
 EOT = 0x04
 
 
@@ -766,7 +766,7 @@ class Link:
     async def send(self, cmd, timeout=20.0):
         self.buf.clear()
         self.done.clear()
-        await self.client.write_gatt_char(CLI, (cmd + "\n").encode(), response=False)
+        await self.client.write_gatt_char(CLI, (cmd + "\n").encode(), response=True)
         try:
             await asyncio.wait_for(self.done.wait(), timeout)
         except asyncio.TimeoutError:
@@ -811,7 +811,7 @@ async def main(args):
 
         print(f"\n[4] join AP '{args.ssid}' from another machine, browse 192.168.4.1,")
         print("    submit credentials, then press Enter here.")
-        await asyncio.get_event_loop().run_in_executor(None, input)
+        await asyncio.get_running_loop().run_in_executor(None, input)
         print(f"    {await link.send('evilportal -status')!r}")
         caps = [e for e in link.events if "captured" in e]
         print(f"    capture events seen: {len(caps)}")

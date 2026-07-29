@@ -25,3 +25,7 @@ lib/mquickjs_headers/mqjs_stdlib_generator.exe
 .idea
 .ai
 .codegraph
+
+# Python bytecode from tools/ble_spike bench scripts
+__pycache__/
+*.pyc

@@ -141,8 +141,20 @@ then blocks for minutes. But see the warning in **Known gotchas** about what
 
 ### BLE transport (`src/modules/ble_api/`)
 
-Advertises as `Bruc`. Service `4371ec0b-…`, CLI characteristic `d555ed97-…`
-(READ|NOTIFY|WRITE), event characteristic `d555ed98-…` (READ|NOTIFY).
+Advertises as `Bruc`. Written out in full because the service and the two
+characteristics share only their *first* field — abbreviating them to `d555ed97-…`
+once led to the characteristics being written with the service's suffix, giving a
+bench script two UUIDs that do not exist on the device:
+
+| | UUID | Properties |
+|---|---|---|
+| Service | `4371ec0b-3d43-49f9-b731-7c72a4a7bb91` | — |
+| CLI characteristic | `d555ed97-bf2a-4f46-b3eb-d1fcdd7325e9` | READ\|NOTIFY\|**WRITE** |
+| Event characteristic | `d555ed98-bf2a-4f46-b3eb-d1fcdd7325e9` | READ\|NOTIFY |
+
+Source of truth: `services/BLESerialService.cpp:70,80`. Note the CLI characteristic
+does **not** advertise `WRITE_NR`, so a client must write **with** response —
+`bleak`'s `response=False` is rejected against this GATT table.
 
 - **Commands** are newline-terminated. **Responses** end with a `0x04` EOT byte —
   *not* the `"# "` prompt, because any CLI output line beginning with `# ` (a dumped
