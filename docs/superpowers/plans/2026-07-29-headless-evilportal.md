@@ -419,9 +419,8 @@ bool evilPortalBgStart(
         return false;
     }
 
-    // Phones expect 192.168.4.1 for captive-portal auto-detection; 172.0.0.1
-    // breaks it. Same default the blocking path applies.
-    if (bruceConfig.evilPortalGatewayIp.isEmpty()) { bruceConfig.evilPortalGatewayIp = "192.168.4.1"; }
+    // The gateway default is applied by the caller in attack_commands.cpp, which
+    // runs ahead of both the blocking and the background path. Do not repeat it.
 
     EvilPortal *portal =
         new (std::nothrow) EvilPortal(ssid, channel, false, false, true, true, templateFile);
