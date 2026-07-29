@@ -266,6 +266,9 @@ with `-DRF_DEBUG=1` if you want them.
 
 Docs under `docs/`, in the order worth reading them:
 
+- **`docs/TEST_STATUS.md`** — coverage map: what has actually been run on hardware,
+  what is shippable, what is broken, and what is still untested with the reason.
+  **Start here** if you are deciding what the app can offer.
 - **`docs/KNOWN_ISSUES.md`** — verified defect register. **Read before planning
   against any verb.** VERIFIED vs SUSPECTED is tracked explicitly; fixed entries move
   to §Resolved with the commit and the proving test rather than being deleted.
