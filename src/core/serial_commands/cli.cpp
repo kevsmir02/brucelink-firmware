@@ -1,6 +1,7 @@
 #include "cli.h"
 #include "badusb_commands.h"
 #include "core/sd_functions.h"
+#include "crash_commands.h"
 #include "crypto_commands.h"
 #include "gpio_commands.h"
 #include "interpreter_commands.h"
@@ -35,6 +36,9 @@ SerialCli::SerialCli() { setup(); }
 void SerialCli::setup() {
     _cli.setOnError(cliErrorCallback);
 
+    // Registered unconditionally, not behind LITE_VERSION: a crash report is worth
+    // more on a stripped build, not less.
+    createCrashCommands(&_cli);
     createCryptoCommands(&_cli);
     createGpioCommands(&_cli);
     createIrCommands(&_cli);

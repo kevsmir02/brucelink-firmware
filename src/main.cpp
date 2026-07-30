@@ -5,6 +5,7 @@
 #include "core/powerSave.h"
 #include "core/ram_profile.h"
 #include "core/serial_commands/cli.h"
+#include "core/serial_commands/crash_commands.h"
 #include "core/utils.h"
 #include "current_year.h"
 #include "esp32-hal-psram.h"
@@ -587,6 +588,11 @@ void setup() {
     // pause/resume crashing on re-init, fixed by the suspend/resume path.
     if (bruceConfig.bleApiAutoStart) enableBLEAPI();
 #endif
+
+    // Last, and outside the LITE_VERSION guard above: a panic on the previous boot
+    // is worth naming on every build, and this is the only channel that reaches a
+    // console here.
+    reportBootCrashState();
 
     RAM_LOG("setup-end");
     RAM_LOG_SAMPLER(5000);
