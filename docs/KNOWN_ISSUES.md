@@ -2230,9 +2230,16 @@ guard is likewise unexercised.
 
 ---
 
-### ISSUE-29 — `POST /cm cmnd=nav` latches button globals that the main menu never clears
+### ISSUE-29 — ~~`POST /cm cmnd=nav` latches button globals that the main menu never clears~~ (premise refuted)
 
-**Status:** OPEN · **Severity:** medium · **Verified** by code 2026-07-30
+**Status:** **WITHDRAWN 2026-07-30 — the defect does not exist** · **Severity:** was medium
+· **Premise refuted by code**, see §Why the premise is false below
+
+Kept rather than deleted because the refutation is the useful part, and because a
+harmless fix was shipped against it before the premise was checked
+(`webInterface.cpp:564-566` now clears the flags explicitly). Neither OPEN nor RESOLVED
+fits: there was nothing to fix, so nothing was proven by fixing it. **No open work
+remains here** — do not plan a re-test.
 
 The `nav` handler sets the button globals and never resets them
 (`webInterface.cpp:537-552`):

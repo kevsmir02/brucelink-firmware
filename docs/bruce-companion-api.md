@@ -6,6 +6,16 @@ earlier design note disagrees with what is written here, the code wins. See
 and [KNOWN_ISSUES.md](./KNOWN_ISSUES.md) for verified defects — read that before
 planning against any verb; this document covers *what the interface is*.
 
+**Contract version:** 2.4 — re-audited against `5c408e6d` on 2026-07-30, after version 2.3
+had drifted **45 commits** behind HEAD (17 of them touching `src/`). New in 2.4, all found
+by reading the code rather than the docs: the **`attack_result` frame** exists and was
+missing from §4.1's union entirely; **`device_state` has eight values, not three**, and §8's
+claim that state frames are unbuilt for the interactive verbs was false; the "every attack
+callback ends in a bare `return true`" warning is **narrowed** to the five interactive verbs,
+since `deauth` and `reverseshell` now report real failure; `deauth <target>` is **rejected**
+rather than silently discarded; and a new **`crashlog`** verb reads the stored ELF core dump
+over BLE (§5). Below this line, 2.3's history is retained.
+
 **Contract version:** 2.3 — audited against `0b2073fa`, re-verified on hardware
 2026-07-29 against `c9c43c03` (which fixed the `fastpair_*` no-op and the lost
 name/UUID/BT-MAC after a spam, §5.1), then extended by a verb-surface and HTTP sweep
@@ -301,14 +311,36 @@ Same JSON on both transports (`/ws` and the BLE event characteristic) — one
 
 ```ts
 type EventFrame =
-  | { id:number, type:'state',        device_state:string }
-  | { id:number, type:'log',          line:string, level:'info'|'warn'|'err' }
-  | { id:number, type:'ble_progress', msg:string }
-  | { id:number, type:'ble_result',   success:boolean, msg:string };
+  | { id:number, type:'state',         device_state:string }
+  | { id:number, type:'log',           line:string, level:'info'|'warn'|'err' }
+  | { id:number, type:'ble_progress',  msg:string }
+  | { id:number, type:'ble_result',    success:boolean, msg:string }
+  | { id:number, type:'attack_result', verb:string, outcome:string,
+                                       elapsed_ms:number, wifi_mode:number,
+                                       free_heap:number };
 ```
 
-`device_state` values emitted today: `idle`, `portal`, `ble_spam`
-(`attack_commands.cpp:51,53,114,123`). No other verb sets state.
+**`attack_result` was missing from this union until 2026-07-30**, while the firmware had
+been emitting it — `pushAttackResult()` (`attack_commands.cpp:197-204`). It carries the
+only real outcome signal the attack verbs have. **`outcome` is `completed`, never
+`success`**, deliberately: these open interactive menus, so finishing one means the
+operator left it, not that an attack worked. Values seen: `completed`,
+`rejected_unsupported_target` (`:229`), `ap_failed` (`:248`).
+
+**`device_state` has eight values, not three. Corrected 2026-07-30** — this line read
+"`idle`, `portal`, `ble_spam` … No other verb sets state", and §8 still claimed state
+frames were unbuilt for everything but `evilportal`/`blespam`. Both were wrong, and an app
+switching on `device_state` would meet values this contract never named:
+
+| Value | Source |
+|---|---|
+| `idle` | `attack_commands.cpp:91,161,210,245`, `evil_portal_bg.cpp:36` |
+| `portal` | `attack_commands.cpp:89`, `evil_portal_bg.cpp:101` |
+| `ble_spam` | `attack_commands.cpp:152` |
+| `karma`, `deauth`, `blesniffer`, `ap_info`, `pwngrid` | `runInteractiveAttack()` passes the verb name — `attack_commands.cpp:208` |
+| `reverseshell` | `attack_commands.cpp:243` |
+
+Treat `device_state` as an open string, not an enum.
 
 `log` frames are emitted for every CLI command dispatch and its result
 (`serialcmds.cpp:45,52,64,68`) — `COMMAND: <text>` then `[CLI] Result: TRUE|FALSE`.
@@ -332,10 +364,16 @@ exits** (§5.2), so any app-side exec timeout shorter than the run will fire on 
 perfectly healthy command. Do not infer failure from that timeout. Ack on
 `COMMAND:`, complete on `[CLI] Result:`.
 
-> ⚠️ **`[CLI] Result:` is a completion signal, not a success signal.** Every attack
-> verb's callback ends in a bare `return true` and discards the outcome of the work
-> it dispatched (`attack_commands.cpp:147-175`), so `TRUE` means "the callback
-> returned", never "the attack worked". Measured 2026-07-29: `reverseshell` reported
+> ⚠️ **`[CLI] Result:` is a completion signal, not a success signal — for the five
+> interactive verbs.** **Narrowed 2026-07-30**; this previously said *every* attack
+> callback ends in a bare `return true`, which is no longer accurate. `runInteractiveAttack()`
+> still returns `true` unconditionally (`attack_commands.cpp:212`) for `karma`, `deauth`,
+> `blesniffer`, `ap_info` and `pwngrid`, and it has to: the upstream entry points it calls
+> are `void`, so there is genuinely no outcome to propagate — read the comment at
+> `attack_commands.cpp:185-196`. But two verbs now report real failure: `deauth` returns
+> `false` when handed a target it cannot aim (`:230`) and `reverseshell` returns `false`
+> when its AP does not come up (`:249`). Prefer the `attack_result` frame (§4.1) over
+> `[CLI] Result:` for any outcome decision. Measured 2026-07-29: `reverseshell` reported
 > `[CLI] Result: TRUE` 30 ms after its AP creation had failed outright
 > (`[E][AP.cpp:225] create(): passphrase too short!` on the console). Rendering that
 > as success would show a green tick for an attack that never started. There is no
@@ -390,6 +428,7 @@ needs both answers, so they are now separate columns.
 | `ble api on\|off` | no | immediately | — | toggles the GATT server; persists across reboot (§5.4) |
 | `systeminfo` | no | immediately | — | same JSON as `GET /systeminfo`; the way to read it over BLE |
 | `free` | no | immediately | — | one-line heap report incl. **largest contiguous DMA block**, which is what actually gates radio init |
+| `crashlog` / `crashlog -clear` | no | immediately | — | Reads the ELF core dump a panic stored in flash: `reset_reason`, faulting task, `exc_pc`, on-device Xtensa backtrace, the dump's `app_elf_sha256`, plus the **running** firmware's sha and a `match=` verdict so a decode can be validated with no console attached. `-clear` erases it. `crash: none stored` when clean. **A wedge writes no dump** (no panic, no watchdog), and the next crash overwrites the last |
 | `webui -off` | no | immediately | — | stops the WebUI **and its AP**; frees the memory for BLE. Verified 2026-07-29 |
 | `webui -bg` | no | immediately | — | starts the WebUI and returns instead of holding the screen. Returned in 357 ms, 2026-07-29. Still prints "Press ESC to quit" — stale text, it does return |
 | `blespam <type> <count>` | no | **after the burst** | `state`, `ble_progress`, `ble_result` — but see below | self-completing, verified 5/5. `fastpair_*` fixed in `c9c43c03` (§5.1). Suspends the BLE link for **0.5–11.9 s** (measured); tolerate ~12 s. Types in §5.1; count < 1 → 10 |
@@ -732,8 +771,15 @@ Listed so nobody plans against them:
 
 - `cred`, `host`, `ap`, `packet` event frames.
 - `/ws` `{cmd:"subscribe", since:…}` and any server-side event replay.
-- `deauth <target>` targeting — the argument is accepted and discarded.
-- `state` frames for any verb other than `evilportal` and `blespam`.
+- ~~`deauth <target>` targeting — the argument is accepted and discarded.~~ **Corrected
+  2026-07-30:** it is no longer discarded silently. A non-empty target is **rejected** with
+  an error and an `attack_result` `outcome:"rejected_unsupported_target"`
+  (`attack_commands.cpp:224-231`), because `wifi_atk_menu()` takes no target. Targeting
+  itself is still not built (ISSUE-5, resolved that way).
+- ~~`state` frames for any verb other than `evilportal` and `blespam`.~~ **Corrected
+  2026-07-30 — they are built.** `runInteractiveAttack()` emits `state` for `karma`,
+  `deauth`, `blesniffer`, `ap_info` and `pwngrid`, and `reverseshell` emits its own. See
+  the `device_state` table in §4.1.
 - Non-blocking execution of the menu-dispatcher verbs — `deauth`, `karma`,
   `blesniffer`, `ap_info`, `pwngrid`. `evilportal` is now the **exception**, not an
   example (§5.3).
