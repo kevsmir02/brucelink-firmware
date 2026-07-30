@@ -183,8 +183,21 @@ listening, so the ID space is gap-free across a transport switch and an app trac
 `lastEventId` can detect what it missed. There is **no** server-side replay; that was
 judged not worth the RAM.
 
-Frames actually emitted: `state`, `log`, `ble_progress`, `ble_result`. Nothing else,
-whatever older design notes claim.
+Frames actually emitted: `state`, `log`, `ble_progress`, `ble_result` and
+**`attack_result`**. Nothing else, whatever older design notes claim.
+
+`attack_result` was missing from this list until 2026-07-30, when it was captured live on
+the event characteristic while `ap_info` was released by the HTTP `nav` rescue:
+
+```json
+{"id":12,"type":"attack_result","verb":"ap_info","outcome":"completed",
+ "elapsed_ms":109994,"wifi_mode":2,"free_heap":7699}
+```
+
+It is emitted by `pushAttackResult()` — e.g. `attack_commands.cpp:253` on a
+`reverseshell` AP failure. It carries the only *real* outcome signal the attack verbs
+have, which matters because `[CLI] Result: TRUE` does not mean success (see
+**Known gotchas**).
 
 ### Boot
 

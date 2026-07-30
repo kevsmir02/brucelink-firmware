@@ -1268,6 +1268,33 @@ press-wait unsatisfied. Repeated pulses *with gaps* supply both edges.
 attempts in between. Treat "repeat until the device answers" as the contract, not a
 fixed count.
 
+**Re-measured 2026-07-30 on ELF `411d7e151dbc2356`, and the answer is that there is no
+fixed minimum.** Same verb, same rescue, single pulses 3 s apart against one blocked
+`ap_info`: pulse **#1 failed** (still blocked 25 s later), **#2 failed**, **#3 failed**,
+**#4 released it** — `{"type":"attack_result","verb":"ap_info","outcome":"completed",
+"elapsed_ms":109994,...}` then the queued `uptime` answered. Against 2026-07-29's
+"1 failed, 6 worked", the count is **nondeterministic**. This closes the "minimum pulse
+count" row in §Not tested with the answer *there isn't one* — do not go looking for a
+threshold to bisect.
+
+**The two-edges explanation above is incomplete; the real mechanism is a three-way race.**
+Because `check()` **clears the flag as it reads it** (`include/globals.h:244-283`),
+whichever of the two loops happens to be active *consumes* the pulse:
+
+- land while `while (check(SelPress))` is spinning → the pulse is eaten by the
+  release-wait, that loop exits, and the press-wait then waits for a *fresh* press;
+- land while `while (!check(SelPress))` is spinning → one pulse is enough.
+
+Racing both is a third party the earlier analysis missed: **`taskInputHandler`
+(`src/main.cpp:84-111`) sets every button global back to false every ≤75 ms**, so it can
+erase a pulse before *either* loop observes it. Meanwhile the handler holds the flag high
+for just one 190 ms iteration. Three tasks, no synchronisation — hence a count that
+varies run to run rather than a fixed two.
+
+**Consequence for the app is unchanged but now rests on a mechanism rather than a guess:**
+pulse until the device answers, and never present the rescue as taking a known number of
+presses.
+
 **2. The rescue is unavailable for every verb that touches a radio.** Two independent
 mechanisms destroy the HTTP transport before it can be used:
 
@@ -1546,6 +1573,63 @@ removes the *stranding* risk (the duration cap self-stops the portal, verified a
 
 **Credential capture with `ble api off` remains the only proven-working configuration,
 and it has not been re-run since the headless work landed.**
+
+---
+
+**Quantified 2026-07-30 on ELF `411d7e151dbc2356` — the mechanism is now a number, and
+the ceiling is one page load.**
+
+Measured against a background portal with the BLE API armed (start:
+`free_heap:17207 dma_block:6132`), from a laptop on the portal AP:
+
+| Request | Result |
+|---|---|
+| `GET /` #1 | **200, 4,726 bytes, 0.33 s** — the full page, correctly |
+| `GET /` #2 | `http=000`, 0 bytes, 12 s timeout |
+| `GET /` #3 | `http=000`, 0 bytes, 12 s timeout |
+| `GET /` #4 | `http=000`, 0 bytes, 12 s timeout |
+| `/hotspot-detect.html` after | `http=000` in **0.196 s** — now refused outright, not stalled |
+| heap after | **free 4,287 / dma largest 884** |
+
+**Serving the portal page exactly once costs ~13 KB and leaves the portal unable to serve
+anything again.** The first load succeeds cleanly; there is no second load. Note the two
+distinct failure shapes in one sequence — the stalls on `/` (connection accepted, body
+never allocated) and then the fast refusal on a small route (server no longer accepting) —
+which is the boundary this register warns against conflating.
+
+**This is what real handsets hit.** During the ISSUE-27 test both an iPhone and an Android
+auto-opened the portal and then showed a blank/failed page: the platform's own probe
+request spends part of the budget, and the page request that follows lands after it is
+gone. The earlier "2,766 of 4,726 bytes then stalled" observation is the same effect
+caught mid-transfer. **So the entry's symptom is not a routing or template defect and not
+specific to `ble api off` — it is a per-page-load cost against a ~17 KB budget.**
+
+The memory is **returned when the portal stops** (`free_heap:53143` after `evilportal -off`,
+matching the normal plateau), so it accumulates for the portal's lifetime rather than
+leaking permanently. `minEver` reached **32 bytes** during these runs, and the console
+logged `E BLE_INIT: Malloc failed` twice.
+
+**Separately measured — a portal start/stop cycle has a one-off cost, not a cumulative
+one.** Three cycles over a single BLE connection with a fixed 25 s post-stop settle
+(equal sampling delay, per this register's own ISSUE-17 lesson):
+
+| | free | dma largest | blocks |
+|---|---|---|---|
+| pristine boot | 81,091 | 31,732 | 10 |
+| after cycle 1 | 53,139 | 18,420 | 19 |
+| after cycle 2 | 52,991 | 18,420 | 20 |
+| after cycle 3 | 52,991 | 18,420 | 20 |
+
+The first cycle costs ~28 KB and 13 KB of the largest DMA block; later cycles are flat
+(−148 bytes total). Three spaced samples were byte-identical, so this is not a sampling
+artifact. **Operational consequence: after any portal cycle the largest DMA block sits at
+18,420 — only ~3 KB above `RADIO_BLE_MIN_DMA_BLOCK` (15,360).** Portal start reproducibly
+costs ~36 KB and takes 3.09 s, the 3,000 ms `yield()` wait at `evil_portal.cpp:170`
+dominating (3088/3086/3088/3151 ms across runs).
+
+**Fix direction:** the page is built as a `String` and copied into the response; reducing
+the number of live copies of a ~4.7 KB body, or streaming it with a chunked response
+instead of `send(200, "text/html", String)`, is where the 13 KB is. Not attempted here.
 
 ---
 
@@ -1890,8 +1974,9 @@ transient enough for a retry to succeed without first freeing memory.
 
 ### ISSUE-27 — the `192.168.4.1` captive-portal gateway default never applies on a configured device
 
-**Status:** OPEN · **Severity:** medium (defeats Android/iOS portal auto-detection) ·
-**Verified** 2026-07-30 · **Confirmed by a real DHCP lease**
+**Status:** OPEN — **but the open question is now ANSWERED, and the premise was wrong** ·
+**Severity:** lowered medium → **low (dead code, not a functional defect)** ·
+**Verified** 2026-07-30 · **Settled against two real handsets 2026-07-30**
 
 `evilportalCmdCallback` sets the phone-friendly gateway **only when the stored value is
 empty** (`attack_commands.cpp:58-59`):
@@ -1906,8 +1991,17 @@ But the config loader never leaves it empty — it defaults to **`172.0.0.1`**
 (`config.cpp:332`). So on any device whose config has been written once, the branch
 never fires and the portal comes up on `172.0.0.1`.
 
-**Confirmed on hardware, not inferred:** a laptop associating to the portal received a
-lease with gateway **`172.0.0.1`**, and the portal answered there.
+**The portal does come up on `172.0.0.1`** — a laptop associating to it is addressed out
+of `172.0.0.0/24` and the portal answers there.
+
+⚠️ **This entry previously said the laptop "received a lease with gateway `172.0.0.1`".
+That was wrong** — a misreading of the lease. Re-measured 2026-07-30 by dumping the raw
+DHCP options (`nmcli -f DHCP4 con show`): the client **requested** the routers option
+(`requested_routers = 1`) and the server sent **no `routers` option at all**. What the
+lease actually carries is `ip_address = 172.0.0.2`, `dhcp_server_identifier = 172.0.0.1`,
+`domain_name_servers = 172.0.0.1`, `dhcp_lease_time = 7200`, `interface_mtu = 1500`. The
+`172.0.0.1` in the earlier note was the DHCP server identity and the DNS address — never
+a gateway. See ISSUE-36.
 
 **The code argues against its own behaviour.** The comment directly above that branch
 states that `172.0.0.1` breaks Android/iOS captive-portal auto-detection and that
@@ -1915,13 +2009,40 @@ phones expect `192.168.4.1`. If that is correct, then the compatibility it exist
 provide **is not in effect on this device, and never has been** — the default is
 unreachable in practice.
 
-**Not established:** whether `172.0.0.1` actually suppresses the captive-portal prompt
-on a real handset. The claim comes from the comment; it has not been tested against a
-phone. Test that before treating this as a functional defect rather than a dead branch.
+**ANSWERED 2026-07-30 against two real handsets: `172.0.0.1` does NOT break
+captive-portal auto-detection. The code comment is false.**
 
-**Fix direction:** either set the gateway unconditionally on the portal path, or drop
-the dead `isEmpty()` branch and change the loader default — but settle the handset
-question first, since the two fixes have opposite consequences.
+Portal `PortalTest` (open, ch 6) on the stock `172.0.0.1`, operator's own phones:
+
+| Handset | What happened unprompted |
+|---|---|
+| iPhone / iOS | The **captive-portal sheet opened by itself**. Page then rendered blank white. |
+| Android | A **browser opened by itself**. Page then failed to load. |
+
+Both platforms *detected* the portal without any user action, which is the entire claim
+the comment makes against `172.0.0.1`. The blank/failed page is a **separate and much
+worse defect** — the portal runs out of heap after a single page load, see ISSUE-21,
+which this test quantified. It is not a gateway-addressing problem.
+
+The detection path was measured directly and explains why the address is irrelevant:
+DNS is hijacked (`dig @172.0.0.1 connectivitycheck.gstatic.com` → `172.0.0.1`, likewise
+`captive.apple.com`), and both probes return the "portal present" answer —
+`/generate_204` → **302** (not 204), `/hotspot-detect.html` → **200** with a
+meta-refresh (not the `Success` body iOS wants). The probe target resolves onto the
+AP's own `/24`, so it is reachable **without any default route** — which is why the
+missing routers option (ISSUE-36) does not break detection either.
+
+**Fix direction — settled: drop the dead `isEmpty()` branch** at
+`attack_commands.cpp:58-60` and the misleading comment above it. Do **not** force
+`192.168.4.1`; there is no measured benefit to it, and the branch as written can never
+execute anyway. Note also that `evilPortalGatewayIp` is **not reachable from the
+companion app at all** — it is absent from the `settings` verb's field list
+(`settings_commands.cpp:106-131`) and can only be changed from the on-device menu
+(`settings.cpp:611-620`), so no remote caller can select either value.
+
+**Left untested on purpose:** whether `192.168.4.1` behaves *better*. It cannot matter
+for the fix now chosen, and it would cost an operator-attended reflash-free menu change
+plus two more handset runs to learn nothing actionable.
 
 ---
 
@@ -1986,9 +2107,45 @@ restart path the entry flagged as a second site.
   operator in front of a portal UI for an attack that can never receive a client,
   while holding the serial task.
 
-⚠️ **NOT VERIFIED ON HARDWARE.** Reaching this code requires `WiFi.softAP()` to
-actually fail, which has not been induced on the bench. The change is code-verified
-and compiles; the failure path itself is untested. Do not record it as proven.
+**The `restartWiFi()` half is now HARDWARE-VERIFIED (2026-07-30, ELF
+`411d7e151dbc2356`). The `beginAP()` half is still code-only.**
+
+**How the failure was induced** — no memory pressure needed, and it is deterministic.
+The portal's own `/ssid` route assigns `apName` straight from the query argument with no
+validation (`evil_portal.cpp:267-270`), and the background tick honours the resulting
+`_pendingWifiRestart` (`:430-433`). So from a client on the portal AP:
+
+```sh
+curl "http://172.0.0.1/ssid?ssid="      # empty SSID
+```
+
+drives `WiFi.softAP("")`, which fails unconditionally at Arduino core `AP.cpp:219`
+(`if (!ssid || *ssid == 0)`). Console captured live:
+
+```
+[E][AP.cpp:220] create(): SSID missing!
+[E][evil_portal.cpp:313] restartWiFi(): [PORTAL] softAP failed on restart for SSID '' on ch6
+```
+
+That capture proves four things at once: `softAP()` genuinely returned false; **the fix's
+new code ran** — `restartWiFi()` now captures a return value it previously discarded
+outright, so this log line cannot exist pre-fix; **`log_e` reaches this board's console**,
+which is the diagnostic half of the fix (ISSUE-22 predicted it, this measures it); and the
+DNS/HTTP rebuild was skipped, since the `return` at `:315` is unconditional and
+immediately follows the log that fired, with no branch in between. External confirmation:
+AP absent from an `nmcli` scan (0 entries), `GET /hotspot-detect.html` → `http=000`
+curl exit 28, laptop deassociated, uptime monotonic 00:37:52 → 00:49:36, zero crash
+markers in the whole capture.
+
+⚠️ **`beginAP()`'s own failure branch remains UNVERIFIED**, and it is a different call
+site. It **cannot be induced through the CLI**, which is why: `attack_commands.cpp:53`
+substitutes `"Free Wifi"` for an empty SSID, and `setup()`'s autoMode branch does it
+again (`evil_portal.cpp:86`), so the empty-SSID trick cannot reach it. **Measured, so the
+next person does not repeat it: a 40-char SSID does NOT make `softAP()` fail** — the
+portal started normally (`free_heap:17079 dma_block:8692`). Arduino truncates to 32 bytes
+and ESP-IDF accepts the oversized `ssid_len`. Reaching `beginAP()`'s branch needs genuine
+resource exhaustion, or a temporary test hook. The constructor's `if (!apUp) return;`
+guard is likewise unexercised.
 
 ---
 
@@ -2055,10 +2212,48 @@ the pulse a falling edge supplies exactly what that first loop is waiting for. S
 latch may well have been the *cause* of "one pulse is not enough", not merely a
 co-symptom.
 
-⚠️ **UNVERIFIED — both halves.** Neither the latch fix itself nor its predicted effect
-on ISSUE-19 has been exercised on hardware; that needs a blocked `ap_info` and a
-single `nav sel` pulse. **Stated as a hypothesis, not a result.** ISSUE-19's guidance
-("pulse until the device answers") stands until someone measures it.
+⚠️ **TESTED 2026-07-30 — the prediction FAILED, and this entry's whole premise is
+FALSE. `nav` never latched anything.** Kept rather than deleted, because the wrong model
+survived two sessions and the refutation is the useful part.
+
+**The measurement.** Fresh boot, `webui -bg` with no navigation (`webui post-begin` dma
+largest **7,156**, the best profile recorded to date), both BLE characteristics
+subscribed. Baseline `uptime` answered in 60 ms. `ap_info` dispatched → `COMMAND: ap_info`
+and `{"type":"state","device_state":"ap_info"}` events, then no EOT for 12 s; a second
+`uptime` queued behind it stayed unanswered for 10 s, confirming the serial task was
+blocked. Then **exactly one** `POST /cm cmnd=nav sel` (`command nav sel success`, http
+200) — and it was **still blocked 25 s later**. See ISSUE-19 for what the pulse count
+actually is.
+
+**Why the premise is false: two independent mechanisms already cleared those flags.**
+
+1. **A dedicated task wipes them every ≤75 ms.** `taskInputHandler` (`src/main.cpp:84-111`,
+   created unconditionally at `:533-540`, priority 2, 10 ms tick, a weak symbol no board
+   overrides) sets `SelPress`, `EscPress`, `AnyKeyPress`, `SerialCmdPress` and every other
+   button global to **false** on each pass, gated only by
+   `if (!AnyKeyPress || millis() - timer > 75)`. It does this whether or not any consumer
+   calls `check()`.
+2. **`check()` clears on read.** It lives at `include/globals.h:244-283` — an
+   `extern inline` taking `volatile bool&`, which is why grepping `src/` for
+   `bool check(` and searching the ELF symbol table both come up empty. Body:
+   `if (!btn) return false; vTaskSuspend(xHandle); btn = false; AnyKeyPress = false;
+   SerialCmdPress = false; delay(10); vTaskResume(xHandle); return true;`
+
+So `EscPress` cannot be latched "true indefinitely" — it is false again within 75 ms. The
+fix is **harmless but addresses a defect that does not exist**, and that is exactly why
+its predicted effect on ISSUE-19 did not appear.
+
+**Two further claims in this entry fall with the premise:**
+- The "Consequence" paragraph — a latched `EscPress` making the *next* menu the operator
+  opens exit itself — cannot happen. No operator opens a menu within 75 ms.
+- The "plausible contributor to ISSUE-30" link is therefore **withdrawn**.
+
+**What is still true** is the mechanical observation the entry opens with: the handler
+does not reset `*var` itself, and the default hold really is 10 ms against a 190 ms loop
+body, so exactly one iteration runs for anything but the `…0`-suffixed forms
+(`webInterface.cpp:546-548`). Also confirmed on the wire and worth keeping: `nav` is
+special-cased before queueing, replying `command nav esc success` rather than
+`command <verb> queued`.
 
 ---
 
@@ -2201,13 +2396,217 @@ it explicitly — `evilPortalBgStop()`, and the "Exit Portal" path — are unaff
 `_beganAp` flag prevents a constructor that bailed out of `setup()` from tearing down
 radio state it never touched.
 
-⚠️ **The fix is UNVERIFIED on hardware.** Confirming it needs an attended run: start
-the blocking `evilportal`, leave it *without* completing "Exit Portal", and re-probe
-the AP and `GET /hotspot-detect.html`. Both must fail for the fix to be proven. The
-`karma` path (`destroyActivePortal()`) is likewise unverified.
+⚠️ **The verification design recorded here was IMPOSSIBLE — corrected 2026-07-30.**
+It said: start the blocking `evilportal`, leave it without completing "Exit Portal",
+re-probe the AP and `GET /hotspot-detect.html`, and both must fail. **That test can never
+pass, and not because the fix is broken.**
+
+`attack_commands.cpp:95` constructs a **temporary** `EvilPortal(...)`. A temporary is
+destroyed when the full expression ends — i.e. when the constructor returns — and the
+constructor only returns when `loop()` returns (`evil_portal.cpp:40`). Verified by
+inspection: `EvilPortal::loop()` (`:329-399`) contains exactly **two** `return`s — the
+`_backgroundMode` guard at the top and the one inside the "Exit Portal" branch
+(`:385-390`) — and **no `break`**. So "left without completing Exit Portal" means `loop()`
+never returns, the temporary is never destroyed, and the destructor **cannot** run. The
+old observation of a portal still serving after such an exit is explained by `loop()`
+still running, not by the empty destructor.
+
+**What the destructor actually covers for the blocking verb** is the `if (!apUp) return;`
+early return at `:39` — a portal whose AP failed now tears down on the way out instead of
+leaking. That path is unreachable through the CLI for the same reason given in ISSUE-28.
+
+**VERIFIED instead: `shutdown()` idempotency, which was the change's real regression
+risk.** `evilportal -off` → `stopPortal()` calls `shutdown()` explicitly, then `delete`
+runs the destructor which calls it again. Result on hardware: portal stopped cleanly, heap
+returned to its normal post-portal plateau (`free_heap:53143 dma_block:18420`), no crash
+markers, uptime monotonic. **Quantitative evidence the `_shutdownDone` guard actually
+fired: the stop took 692 ms**, which is one teardown's worth of the 500 ms of `vTaskDelay`
+in `shutdown()` — a second full pass would have shown ~1,190 ms.
+
+⚠️ **Still unverified:** the `karma` path (`destroyActivePortal()`), which is the case this
+entry was originally opened for.
+
+**The real remaining defect this exposed is not the destructor at all: the blocking
+`evilportal` has exactly one exit, and it is a menu selection.** No timeout, no remote
+stop, no `returnToMenu` check. That belongs to ISSUE-6/ISSUE-1's headless-entry-point work,
+and ISSUE-35 records that the one function which *would* have given `loop()` a time-based
+exit is never called.
 
 **`shouldTerminate()` is still dead code** and the unexplained self-exiting portal
 remains unexplained; nothing above touches either.
+
+---
+
+### ISSUE-32 — `CaptiveRequestHandler` is inert: a `const` mismatch means it never overrides
+
+**Status:** OPEN · **Severity:** low (behaviour is nearly identical; it is dead weight and
+a trap) · **Verified** by code 2026-07-30
+
+`CaptiveRequestHandler::canHandle` is declared **non-const** (`evil_portal.h:14`):
+
+```cpp
+bool canHandle(AsyncWebServerRequest *request) { return true; }
+```
+
+The base declares it **const** (`ESPAsyncWebServer.h:1533`):
+
+```cpp
+virtual bool canHandle(AsyncWebServerRequest *request) const { return false; }
+```
+
+Different signatures, so this **does not override** — there is no `override` keyword to
+have caught it. Dispatch calls `h->canHandle(request)` through the base pointer
+(`WebServer.cpp:147`), gets the base's `false`, and **skips the handler for every
+request**. Consequences:
+
+- `CaptiveRequestHandler::handleRequest` (`evil_portal.cpp:54-78`) **never runs**, so the
+  `AsyncResponseStream` it allocates at `:55` and never passes to `request->send()` — a
+  genuine per-request leak of a 1,460-byte `cbuf` plus object, by construction — **never
+  actually fires.** Recorded because fixing the `const` bug without also deleting line 55
+  would *introduce* that leak.
+- `webServer.onNotFound(...)` (`:278-294`) is therefore the **live** fallback, not dead
+  code, and it duplicates most of `handleRequest`'s logic.
+- The handler object `new`ed at `:296` is pure overhead.
+
+**Established by measurement, not just reading:** heap returned fully to its normal
+post-portal plateau after sessions containing many requests (53,143 vs the 52,231-52,991
+plateau), which a live 1.4 KB-per-request leak could not do.
+
+**Fix direction:** delete the class and the `addHandler` call, keeping `onNotFound`. Do
+*not* merely add `const`.
+
+---
+
+### ISSUE-33 — `evilportal -status` reports a portal whose AP is dead as "running"
+
+**Status:** OPEN · **Severity:** medium (the app shows a healthy portal that captures
+nothing) · **Verified** on hardware 2026-07-30
+
+`evilPortalBgStatus()` (`evil_portal_bg.cpp:115-124`) keys everything off
+`bgPortal != nullptr` and never consults `apOnAir()` or `_servicesUp`. Measured
+immediately after the induced softAP failure of ISSUE-28, with the AP provably gone from
+an `nmcli` scan and HTTP refusing connections:
+
+```
+portal: running ssid:PortalTest ch:6 uptime_s:126 creds:0 cap_remaining_s:473 …
+```
+
+The portal was serving nothing and had no AP, yet reports a live cap and a running state.
+`restartWiFi()` sets `_servicesUp = false` on that path (`:314`) — the information exists
+and is simply not surfaced.
+
+**Fix direction:** have the status line carry `apOnAir()`/`_servicesUp`, and consider
+having the tick stop a portal that has lost its AP rather than leaving a zombie.
+
+---
+
+### ISSUE-34 — any client on the portal AP can kill the portal with one unauthenticated request
+
+**Status:** OPEN · **Severity:** medium (remote self-DoS of a running attack) ·
+**Verified** on hardware 2026-07-30
+
+The `/ssid` route assigns `apName` from the query argument with **no validation of length
+or emptiness** and no authentication (`evil_portal.cpp:267-270`, and the identical
+unreachable copy at `:67-70`):
+
+```cpp
+if (request->hasArg("ssid")) {
+    apName = request->arg("ssid").c_str();
+    request->send(200, "text/html", ssid_POST());
+    _pendingWifiRestart = true;
+}
+```
+
+`GET /ssid?ssid=` — an empty value — therefore drives `WiFi.softAP("")`, which fails, and
+the AP goes down permanently for that portal instance. Confirmed live; it is the induction
+used to verify ISSUE-28. A victim, or anyone in range of an open AP, can end the attack.
+Enabled by default on this device (`allowSetSsid: true`, read from `/bruce.conf`).
+
+**Fix direction:** reject an empty or >32-byte SSID before assigning, and leave the
+running AP untouched when the value is invalid.
+
+---
+
+### ISSUE-35 — `shouldTerminate()` is the only consumer of a duration policy `karma` actively maintains
+
+**Status:** OPEN · **Severity:** medium (karma believes it has a portal time limit and has
+none) · **Verified** by code 2026-07-30
+
+ISSUE-31 notes `shouldTerminate()` is uncalled. It is worse than an unused helper: it is
+the **sole reader** of `_baseDurationSec` and `_extendedDurationSec`
+(`evil_portal.cpp:462-471`), and `karma` populates and maintains exactly those:
+
+| Site | Call |
+|---|---|
+| `karma_attack.cpp:1792` | `setBaseDuration(attackConfig.baseDuration / 1000)` |
+| `karma_attack.cpp:1793` | `setExtendedDuration(attackConfig.extendedDuration / 1000)` |
+| `karma_attack.cpp:1709` | `checkAndExtendDuration()` — flips `_durationExtended` |
+
+A tree-wide grep finds `shouldTerminate` **only** at its declaration (`evil_portal.h:59`)
+and definition. So karma configures a base duration, extends it on activity, and
+**nothing ever checks whether the duration elapsed**. The whole policy is inert.
+
+This is also why the headless portal had to implement its own cap in `portal_cap.h`
+rather than reuse this.
+
+**Fix direction:** either call `shouldTerminate()` from `loop()`/`processRequests()` —
+which would also give the blocking verb the time-based exit ISSUE-31 identifies as
+missing — or delete the subsystem and karma's three calls into it. Do not leave it
+half-wired.
+
+---
+
+### ISSUE-36 — the portal's DHCP server hands out no default gateway
+
+**Status:** OPEN · **Severity:** low (captive-portal detection is unaffected; anything
+needing a route is not) · **Verified** on hardware 2026-07-30
+
+`beginAP()` configures the AP with `WiFi.softAPConfig(apGateway, apGateway,
+IPAddress(255,255,255,0))` (`evil_portal.cpp:154`), passing the same address as both local
+IP and gateway. The DHCP server that results **omits the routers option entirely**. Raw
+options from a client that explicitly asked for it (`nmcli -f DHCP4 con show`):
+
+```
+requested_routers = 1                      <- client asked
+ip_address = 172.0.0.2
+dhcp_server_identifier = 172.0.0.1
+domain_name_servers = 172.0.0.1
+dhcp_lease_time = 7200 · interface_mtu = 1500 · broadcast_address = 172.0.0.255
+```
+
+No `routers = …` in the reply, and `nmcli` shows `IP4.GATEWAY: --`. Clients get an address
+and a DNS server but **no default route**.
+
+Captive-portal detection survives this because the hijacked DNS points the probe at
+`172.0.0.1`, which is on-link (see ISSUE-27) — so this is not what breaks the handset
+experience. It does mean any client behaviour that depends on having a default route will
+not work, and it is the fact the old ISSUE-27 text misread as "a lease with gateway
+172.0.0.1".
+
+---
+
+### ISSUE-37 — the portal serves only one handset at a time
+
+**Status:** OPEN · **Severity:** medium · **Observed** 2026-07-30 · **Mechanism
+SUSPECTED, not verified**
+
+With an iPhone associated to the portal AP, an Android phone **could not join at all**.
+After the network was forgotten on the iPhone, the Android associated normally. Reported
+by the operator during the ISSUE-27 handset test.
+
+`WiFi.softAP(apName, emptyString, _channel)` leaves `max_connection` at the Arduino
+default of 4 (`AP.cpp:236`), so the AP is not configured to refuse a second station.
+
+**Suspected cause is memory, not configuration:** the portal starts at roughly
+`free_heap:17000 dma_block:6100` with the BLE API armed, and a second station's driver
+buffers plausibly cannot be allocated from that. Consistent with the console showing
+`E BLE_INIT: Malloc failed` twice during the same session and `minEver` reaching **32
+bytes**. **Not verified** — no allocation-failure log names the station path, and the
+association failure was observed once, from the client side only.
+
+**Next experiment:** repeat with `ble api off` for the extra ~62 KB and see whether two
+stations associate. If they do, this is a memory-capacity limit and belongs with ISSUE-21
+rather than being its own defect.
 
 ---
 
@@ -2218,7 +2617,7 @@ Recorded so the gap is visible rather than implied. Session of 2026-07-29, unatt
 | Item | Why not |
 |---|---|
 | ~~`POST /cm cmnd=nav esc` against a running blocking verb~~ | **DONE 2026-07-29** — see ISSUE-19. The rescue works on `ap_info` but needs repeated pulses, and is unavailable for every radio verb. |
-| Minimum pulse count for the `nav` rescue | 1 failed, 6 succeeded, with other attempts in between; the exact threshold was not bisected. Would need a fresh block per trial. |
+| ~~Minimum pulse count for the `nav` rescue~~ | **DONE 2026-07-30 — there is no fixed minimum.** Single pulses 3 s apart against one blocked `ap_info`: #1, #2, #3 failed, #4 released. Against 2026-07-29's 1-failed/6-worked, the count is nondeterministic; a three-way race explains why. See ISSUE-19. **Do not bisect for a threshold.** |
 | Whether `pwngrid` is rescuable | It is the only other blocking verb that appears to touch neither radio, so it should be, but it was not tested. |
 | `/getscreen`, `/listfiles`, `/file`, `/upload`, `/edit`, `/rename`, WS `/ws` | Same blocker. `GET /` (200) and `GET /systeminfo` (401 unauth) are the only routes exercised. |
 | ~~`badusb run_from_file`~~ | **DONE 2026-07-29, attended** — types nothing and hangs the device forever. See ISSUE-20. |
@@ -2232,7 +2631,7 @@ Recorded so the gap is visible rather than implied. Session of 2026-07-29, unatt
 | **ISSUE-24's fix (`d71f19e9`) on hardware** | **Still unverified after three attempts** 2026-07-30 — one invalidated by an operator RST, one blocked by the ISSUE-12 memory ceiling, one designed wrong (device parked in a submenu, where the repaint provably cannot fire). The only discriminating test is `POST /cm cmnd=evilportal`; see ISSUE-24. |
 | Credential capture with the **headless** portal | Approved but never run. Needs `ble api off` for the heap, plus a short duration cap so the portal self-stops — the cap is proven (+45.6 s on a 45 s cap) which is what makes the BLE-off configuration recoverable at all. |
 | ISSUE-30's root cause | No backtrace obtainable — nothing panics, no watchdog fires. Next experiment is changing `display.cpp:744`'s `Serial.println` to `log_e` so the "Selected:" line becomes visible. |
-| Whether `172.0.0.1` really breaks handset captive-portal detection | ISSUE-27 rests on a code comment, not a handset test. The fix direction depends on the answer. |
+| ~~Whether `172.0.0.1` really breaks handset captive-portal detection~~ | **DONE 2026-07-30, two real handsets — it does NOT.** iOS opened the captive sheet by itself, Android opened a browser by itself, both on the stock `172.0.0.1`. The code comment is false and the fix direction is settled (drop the dead branch). Both then showed a blank page, which is ISSUE-21, not addressing. See ISSUE-27. |
 | `poweroff`, `sleep` | Would take the device down with nobody present to power-cycle it. `reboot` was tested instead and passed 2/2. |
 | `blespam random`/`all`, interactive `blespam menu` | Menu-driven; needs on-device dismissal. |
 | MTU 247 negotiation | BlueZ negotiates 128 and will not go higher; needs an Android client. Chunking remains half-verified. |
