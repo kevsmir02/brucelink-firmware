@@ -465,13 +465,26 @@ board -- the ISSUE-42 mistake."
 
 ---
 
-## Task 3: RC4 hardware verification
+## Task 3: RC4 hardware verification — ✅ DONE 2026-07-30, app elf `79fc138cd`
+
+> **Step 2 was wrong and was replaced.** It said to compare `sha256sum firmware.elf`
+> against `crashlog`'s `elf=`; those are different digests and could never match.
+> `crashlog` now prints `running_elf=` from `esp_app_get_elf_sha256_str()` with a
+> `match=` verdict, settled on-device. Confirmed: the panic handler's
+> `ELF file SHA256: 79fc138cd` is byte-identical to it.
+>
+> **Step 3 was also wrong**: it said provoke the panic with `deauth`, but `deauth`
+> ran 21 min clean on the fixed build, so a null result would prove nothing. Replaced
+> by `crashlog -selftest`, a deliberate `abort()` with a *known* expected backtrace.
+>
+> **Step 4 is impossible as written**: this board is USB-powered, so unplugging it
+> powers it off. Done as "no process holding the port" (`fuser`: no holders) instead.
 
 **Files:** none. This task produces evidence, not code.
 
 No fix is trustworthy until this passes, and every later task depends on `crashlog` being reliable.
 
-- [ ] **Step 1: Flash and confirm a clean baseline**
+- [x] **Step 1: Flash and confirm a clean baseline**
 
 ```bash
 pio run -e smoochiee-board -t upload
@@ -482,7 +495,7 @@ Expected: `crash: reset_reason=poweron(1)` or `sw_restart(3)`, then `crash: none
 
 If a dump *is* stored, it is from a real earlier panic. Record it, then `crashlog -clear` before continuing.
 
-- [ ] **Step 2: Record the local ELF prefix**
+- [x] **Step 2: Record the local ELF prefix**
 
 ```bash
 sha256sum .pio/build/smoochiee-board/firmware.elf | cut -c1-9
@@ -490,7 +503,7 @@ sha256sum .pio/build/smoochiee-board/firmware.elf | cut -c1-9
 
 Note the value. `crashlog`'s `elf=` must match it in step 5, or the decode is fiction.
 
-- [ ] **Step 3: Provoke a panic, with the console captured as a control**
+- [x] **Step 3: Provoke a panic, with the console captured as a control**
 
 Terminal 1: `.venv/bin/python tools/ble_spike/usbwatch2.py` — **only ever run one instance**; two silently split the stream and both look empty.
 
@@ -498,11 +511,11 @@ Terminal 2: dispatch `deauth` over BLE and wait. ISSUE-1 records 70–130 s to t
 
 Expected in terminal 1: `assert failed: xTaskPriorityDisinherit`, a `Backtrace:` line, and an `ELF file SHA256:` line. Save the capture.
 
-- [ ] **Step 4: Unplug the console**
+- [x] **Step 4: Unplug the console**
 
 Physically disconnect USB, or stop the capture and close the port. This is the condition the feature exists for.
 
-- [ ] **Step 5: Read the dump over BLE**
+- [x] **Step 5: Read the dump over BLE**
 
 ```bash
 .venv/bin/python tools/ble_spike/bcli.py "crashlog"
@@ -510,7 +523,7 @@ Physically disconnect USB, or stop the capture and close the port. This is the c
 
 Expected: `reset_reason=panic(4)`, a `task=`, a `pc=`, an `elf=` equal to step 2's value, and a `bt=` line.
 
-- [ ] **Step 6: Cross-check the decode against the control capture**
+- [x] **Step 6: Cross-check the decode against the control capture**
 
 ```bash
 ~/.platformio/packages/toolchain-xtensa-esp32s3/bin/xtensa-esp32s3-elf-addr2line \
@@ -519,11 +532,11 @@ Expected: `reset_reason=panic(4)`, a `task=`, a `pc=`, an `elf=` equal to step 2
 
 Expected: the same call path the terminal-1 capture showed. **This agreement is what makes `crashlog` trustworthy for every later use.** If they disagree, stop and investigate before proceeding to Task 4.
 
-- [ ] **Step 7: Verify erase**
+- [x] **Step 7: Verify erase**
 
 `crashlog -clear` → `crash: cleared`, then `crashlog` → `crash: none stored`.
 
-- [ ] **Step 8: Record the result**
+- [x] **Step 8: Record the result**
 
 Append to `docs/TEST_STATUS.md` under **Shippable today**: the `crashlog` row, with the device date and the ELF prefix, and note that the decode matched a console capture of the same crash. Commit:
 

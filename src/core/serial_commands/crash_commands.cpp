@@ -23,6 +23,18 @@ static uint32_t crashlogCallback(cmd *c) {
     const int reason = (int)esp_reset_reason();
     serialDevice->printf("crash: reset_reason=%s(%d)\r\n", resetReasonName(reason), reason);
 
+    if (cmd.getArgument("selftest").isSet()) {
+        // Deliberate abort, because the crash path cannot otherwise be tested with a
+        // known-good answer: every real crash here is a race, so a clean run would
+        // prove nothing about whether the dump was written and parsed correctly.
+        // Flush by hand -- parse() never returns, so the usual prompt+EOT never runs
+        // and a client would otherwise wait out its timeout on a device that died.
+        serialDevice->println("crash: aborting deliberately to test the dump path");
+        serialDevice->endOfResponse();
+        vTaskDelay(pdMS_TO_TICKS(300));
+        abort();
+    }
+
     if (cmd.getArgument("clear").isSet()) {
         esp_err_t err = esp_core_dump_image_erase();
         // Both ternary branches are String: mixing a literal with a String would
@@ -107,4 +119,5 @@ void reportBootCrashState() {
 void createCrashCommands(SimpleCLI *cli) {
     Command crashCmd = cli->addCommand("crashlog", crashlogCallback);
     crashCmd.addFlagArg("clear");
+    crashCmd.addFlagArg("selftest");
 }

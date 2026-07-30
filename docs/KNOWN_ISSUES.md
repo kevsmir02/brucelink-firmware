@@ -537,6 +537,30 @@ the flags did not stop transmission.
 **Status:** OPEN · **Severity:** unknown · **Observed once** 2026-07-29 · **No console
 capture of the event** · **Not reproduced in 2 subsequent attempts**
 
+> **"No console capture" is no longer a dead end — 2026-07-30.** `crashlog` reads the ELF
+> core dump a panic stores in flash, so a future occurrence leaves evidence whether or not
+> anyone was watching (see §Shippable in `TEST_STATUS.md`). **A dump survives a firmware
+> flash** — `upload` writes 0x0/0x8000/0x10000 and the coredump partition is at 0xFF0000 —
+> but the next crash overwrites the last, so read it before provoking another.
+>
+> **And a real one was recovered on the very first read**, from a crash nobody had seen:
+>
+> ```
+> crash: task=loopTask pc=0x400556d2 elf=a4bc5d735 depth=10 corrupted=no
+> crash: bt=0x400556d2 0x422992e2 0x4228e855 0x4228e895 0x4214b1ad 0x421f113b
+>            0x4207adc5 0x420aa58e 0x4214ec6c 0x40385bbd
+> ```
+>
+> **It is not an ISSUE-1 crash**: both of those are in `_serialCmdsTaskLoop`, the serial
+> task, while this is **`loopTask` — the main loop**. Whether it is *this* entry's reboot is
+> **unknown**; it is simply the most recent panic the partition held.
+>
+> ⚠️ **Undecoded, and deliberately not guessed at.** `app_elf_sha256` is `a4bc5d735` and the
+> build that produced it is gone from `.pio`, so decoding against any current ELF would be
+> fiction by this repo's own rule. Recoverable only by rebuilding the commit whose app sha
+> is `a4bc5d735` and confirming the match first. The raw record is kept above so that
+> remains possible.
+
 During the first post-fix verification sweep the device rebooted once. It was detected
 after the fact, not observed: `uptime` read `00:01:00` with `free` reporting
 `t=60638ms`, when at least ~300 s of testing had run since the flash. Every later
