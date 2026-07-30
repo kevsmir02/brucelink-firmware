@@ -412,7 +412,16 @@ static bool startMdnsResponder() {
 **********************************************************************/
 void configureWebServer() {
     mdnsRunning = startMdnsResponder();
-    DefaultHeaders::Instance().addHeader("Access-Control-Allow-Origin", "*");
+    // addHeader() is a bare emplace_back() on a singleton with no dedup and no
+    // teardown counterpart (stopWebUi() doesn't undo it), so every start/fail/retry
+    // cycle used to leak another duplicate header onto every response after it.
+    // -selftest turns that cycle from an accident into a designed, repeated
+    // operation, so guard it to run once per boot instead.
+    static bool corsHeaderAdded = false;
+    if (!corsHeaderAdded) {
+        DefaultHeaders::Instance().addHeader("Access-Control-Allow-Origin", "*");
+        corsHeaderAdded = true;
+    }
     server->onNotFound(notFound);
 
     // Index
