@@ -401,7 +401,7 @@ needs both answers, so they are now separate columns.
 | `blesniffer` | **YES** | only after dismissal | — | opens the BLE Suite menu. Tested: blocks, no crash in 90 s; the BLE control link survives |
 | `ap_info` | **YES** | only after dismissal | — | Tested: blocks, no crash. **Exits on SELECT only** — Esc is ignored (§ISSUE-6) |
 | `pwngrid` | **YES** | only after dismissal | — | starts Brucegotchi. Tested: blocks, no crash in 90 s |
-| `reverseshell` | no | **immediately** | — | **does not block** — returned in 90 ms. But it returned `Result: TRUE` while its AP creation had failed (§ISSUE-7) |
+| `reverseshell` | **YES — indefinitely** | only after the on-device Esc chord | — | ⚠️ **Corrected 2026-07-30.** This row read "does not block — returned in 90 ms", which was measured when the WPA2 passphrase bug made the AP fail instantly so the verb returned early. With the AP fixed it blocks for its whole life: dispatched over BLE, **no EOT after 25 s**, `BruceShell` on air. **No remote rescue** — it binds port 80 itself, so `POST /cm nav esc` is gone too. Exits cleanly now (§ISSUE-38) but leaves its AP broadcasting (§ISSUE-39) |
 
 > ☠️ **`deauth` panics the device, reproducibly.** Not "blocks" — panics.
 > `assert failed: xTaskPriorityDisinherit` inside `spiEndTransaction`, ~20–70 s after
@@ -411,10 +411,13 @@ needs both answers, so they are now separate columns.
 > Full decoded backtrace and root cause in
 > [KNOWN_ISSUES.md](./KNOWN_ISSUES.md) §ISSUE-1. Verified 2/2 on 2026-07-29.
 >
-> **`deauth` is the only verb that crashes.** All five other menu-dispatcher verbs
-> were individually tested on 2026-07-29 with the console captured: `karma`,
-> `blesniffer`, `ap_info` and `pwngrid` block but survive; `reverseshell` does not
-> even block. The exception is instructive — `ap_info` draws through
+> **`deauth` is the only verb that crashes *while running*.** All five other
+> menu-dispatcher verbs were individually tested on 2026-07-29 with the console captured:
+> `karma`, `blesniffer`, `ap_info` and `pwngrid` block but survive. **`reverseshell` was
+> listed here as "does not even block"; that was wrong** — it blocks indefinitely once its
+> AP actually starts, and until `cedad77f` it crashed the device on *exit* rather than
+> while running (heap corruption, §ISSUE-38, now fixed). The exception is instructive —
+> `ap_info` draws through
 > `ScrollableTextArea`, which redraws only on input, while `deauth`'s `loopOptions`
 > path drives `drawArc` continuously. The collision needs *sustained* drawing from
 > the serial task, so a quiet UI is not the same as a safe one, and a clean 90 s

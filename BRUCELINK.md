@@ -282,6 +282,16 @@ with `-DRF_DEBUG=1` if you want them.
   the dismissal key differs per verb: `ap_info` exits on **SELECT only** and ignores
   Esc; menu verbs take Esc or a "Main Menu" entry; `evilportal` takes Esc *then*
   "Exit Portal".
+- **A verb that binds port 80 has no remote rescue at all.** `reverseshell` runs its own
+  AsyncWebServer on 80, so the WebUI and its `/cm nav esc` are gone for the verb's whole
+  life — the on-device LEFT+RIGHT chord is the only exit. Verifying anything about its
+  exit therefore needs an operator at the board; budget for that rather than discovering
+  it mid-test.
+- **Radio verbs that exit cleanly may still leave their AP on air.** `EvilPortal` did
+  (ISSUE-31) and `reverseshell` still does (ISSUE-39): its exit stops the TCP, WS, HTTP
+  and DNS servers but never calls `WiFi.softAPdisconnect()`/`wifiDisconnect()`, so the AP
+  keeps broadcasting and ~63 KB stays held after the verb returns. **`free` returning to
+  its idle plateau is the cheap check** — 18,387 versus 81,327 is the whole tell.
 - **`wifi_mode` in `/systeminfo` is an integer** (`0`=OFF `1`=STA `2`=AP `3`=APSTA),
   not a string. **`ip` is `WiFi.localIP()`**, which reads `0.0.0.0` in AP mode — use
   the known `192.168.4.1`.

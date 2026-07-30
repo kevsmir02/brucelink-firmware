@@ -72,7 +72,7 @@ Verified end-to-end on hardware, safe to expose as a one-tap action.
 | `badusb` (BLE HID) | **Not reachable** — no CLI path exists at all | ISSUE-20 |
 | Serial CLI over USB | **Does not exist on this board.** BLE is the only command interface | ISSUE-22 |
 | `evilportal` (blocking) — **leaks its AP** | Exiting without completing "Exit Portal" leaves the AP, DNS and web server **running and serving** (200 in 11 ms). Hardware-confirmed 2026-07-30. Destructor fix landed in `411d7e151dbc2356` but is **unverified** | ISSUE-31 |
-| `reverseshell` | AP could **never** start on any build — `softAP("BruceShell","bruce")`, and WPA2 rejects a passphrase under 8 chars. Passphrase fixed 2026-07-30; **the AP-up path is untested** | ISSUE-7 |
+| `reverseshell` — **leaks its AP on exit** | The verb now works end to end and exits cleanly (`cedad77f` closed the heap-corruption reboot, ISSUE-38). But the exit path never brings the radio down, so `BruceShell` keeps broadcasting WPA2 after the operator ends the attack, holding ~63 KB. Two scans plus a successful association confirmed it 2026-07-30 | ISSUE-39 |
 | HTTP **bodies** with BLE armed | Small replies work; a real page body does not. TCP 80 accepts, `GET /` returns 0 bytes. **Corrected 2026-07-30** — this row previously read "both transports cannot coexist", which is wrong: BLE + AP + WebUI ran together and served `POST /login` and `POST /cm` fine | ISSUE-16, ISSUE-21 |
 | `js` output/errors | Interpreter runs, but no return channel at all | ISSUE-15 |
 | `rf rx`, `md5`/`stat` on a missing file | Silent failure, empty reply | ISSUE-13 §context |
@@ -103,7 +103,10 @@ Verified end-to-end on hardware, safe to expose as a one-tap action.
 | A failed GATT **write** means retry; an empty **reply** means do not | ISSUE-26 vs ISSUE-16 — opposite handling, distinguishable at the client by whether the write raised. |
 | `BLE_INIT: Malloc failed` on the console | The device is one allocation from an `abort()` reboot (ISSUE-25). |
 | The main loop can wedge while BLE still answers | Remote surfaces responding is **not** evidence the device is usable at the board. Frozen status-bar clock is the cheap liveness probe (ISSUE-30). |
-| Evil Portal gateway is `172.0.0.1`, never `192.168.4.1` | The phone-friendly default is dead code on any configured device (ISSUE-27). |
+| Evil Portal gateway is `172.0.0.1`, never `192.168.4.1` | And that is fine: two real handsets auto-detected the portal on `172.0.0.1`. The `192.168.4.1` default was dead code and was **removed** in `cedad77f` (ISSUE-27, resolved). |
+| `evilportal -status` reports AP health, not just liveness | `portal: running ap:up services:up ssid:… ` — reads `degraded` when the AP or its services are down, and the SSID is the live one after a `/ssid` rename (ISSUE-33, resolved in `cedad77f`). |
+| `/ssid?ssid=` cannot kill a running portal | Empty and >32-byte values return **400** and leave the AP untouched; 32 bytes is accepted (ISSUE-34, resolved in `cedad77f`). |
+| `reverseshell` exits without crashing | The heap-corruption reboot on its only exit path is fixed; uptime is continuous across the exit (ISSUE-38, resolved in `cedad77f`). **But it leaves its AP on air** — ISSUE-39. |
 
 ---
 
@@ -136,9 +139,10 @@ The honest gap. See §"Not tested, and why" in KNOWN_ISSUES.md for the full tabl
   button globals should also supply the release edge that `ScrollableTextArea` waits
   for, which may be why one `nav` pulse never sufficed. Both halves unverified; needs
   a blocked `ap_info` and a single pulse.
-- **`reverseshell` with a working AP** — the passphrase bug is fixed (WPA2 needs ≥8
-  chars; it was `"bruce"`), so the AP should now start, but the verb then blocks until
-  an Esc chord. Needs an attended run.
+- ~~**`reverseshell` with a working AP**~~ — **DONE 2026-07-30, attended.** AP up (WPA2,
+  ch 1), relay proven both directions, and the Esc-chord exit now returns without the
+  heap-corruption reboot (ISSUE-38 resolved). What it exposed instead: the exit leaves
+  the AP on air (ISSUE-39).
 - **Credential capture with the headless portal** — approved, never run. Needs
   `ble api off` plus a short duration cap.
 - **ISSUE-30's root cause** — the main-loop wedge. No backtrace obtainable; next step

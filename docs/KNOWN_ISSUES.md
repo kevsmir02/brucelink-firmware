@@ -1230,6 +1230,15 @@ on the hardware above, 2026-07-29, over the BLE CLI characteristic unless stated
 
 ---
 
+## Open — later findings
+
+Entries from 2026-07-29 onward. These were appended after the tables above and had been
+sitting under §Verified working with no heading of their own, which made 22 open defects
+invisible to anyone scanning §Open. Same status rules as §Open; kept in a second section
+only to preserve the numbering and the existing anchors.
+
+---
+
 ### ISSUE-19 — the HTTP `nav` rescue works, but needs repeated pulses and is unavailable for every radio verb
 
 **Status:** OPEN · **Severity:** high (it is the only remote recovery path there is) ·
@@ -1972,80 +1981,6 @@ transient enough for a retry to succeed without first freeing memory.
 
 ---
 
-### ISSUE-27 — the `192.168.4.1` captive-portal gateway default never applies on a configured device
-
-**Status:** OPEN — **but the open question is now ANSWERED, and the premise was wrong** ·
-**Severity:** lowered medium → **low (dead code, not a functional defect)** ·
-**Verified** 2026-07-30 · **Settled against two real handsets 2026-07-30**
-
-`evilportalCmdCallback` sets the phone-friendly gateway **only when the stored value is
-empty** (`attack_commands.cpp:58-59`):
-
-```cpp
-if (bruceConfig.evilPortalGatewayIp.isEmpty()) {
-    bruceConfig.evilPortalGatewayIp = "192.168.4.1";
-}
-```
-
-But the config loader never leaves it empty — it defaults to **`172.0.0.1`**
-(`config.cpp:332`). So on any device whose config has been written once, the branch
-never fires and the portal comes up on `172.0.0.1`.
-
-**The portal does come up on `172.0.0.1`** — a laptop associating to it is addressed out
-of `172.0.0.0/24` and the portal answers there.
-
-⚠️ **This entry previously said the laptop "received a lease with gateway `172.0.0.1`".
-That was wrong** — a misreading of the lease. Re-measured 2026-07-30 by dumping the raw
-DHCP options (`nmcli -f DHCP4 con show`): the client **requested** the routers option
-(`requested_routers = 1`) and the server sent **no `routers` option at all**. What the
-lease actually carries is `ip_address = 172.0.0.2`, `dhcp_server_identifier = 172.0.0.1`,
-`domain_name_servers = 172.0.0.1`, `dhcp_lease_time = 7200`, `interface_mtu = 1500`. The
-`172.0.0.1` in the earlier note was the DHCP server identity and the DNS address — never
-a gateway. See ISSUE-36.
-
-**The code argues against its own behaviour.** The comment directly above that branch
-states that `172.0.0.1` breaks Android/iOS captive-portal auto-detection and that
-phones expect `192.168.4.1`. If that is correct, then the compatibility it exists to
-provide **is not in effect on this device, and never has been** — the default is
-unreachable in practice.
-
-**ANSWERED 2026-07-30 against two real handsets: `172.0.0.1` does NOT break
-captive-portal auto-detection. The code comment is false.**
-
-Portal `PortalTest` (open, ch 6) on the stock `172.0.0.1`, operator's own phones:
-
-| Handset | What happened unprompted |
-|---|---|
-| iPhone / iOS | The **captive-portal sheet opened by itself**. Page then rendered blank white. |
-| Android | A **browser opened by itself**. Page then failed to load. |
-
-Both platforms *detected* the portal without any user action, which is the entire claim
-the comment makes against `172.0.0.1`. The blank/failed page is a **separate and much
-worse defect** — the portal runs out of heap after a single page load, see ISSUE-21,
-which this test quantified. It is not a gateway-addressing problem.
-
-The detection path was measured directly and explains why the address is irrelevant:
-DNS is hijacked (`dig @172.0.0.1 connectivitycheck.gstatic.com` → `172.0.0.1`, likewise
-`captive.apple.com`), and both probes return the "portal present" answer —
-`/generate_204` → **302** (not 204), `/hotspot-detect.html` → **200** with a
-meta-refresh (not the `Success` body iOS wants). The probe target resolves onto the
-AP's own `/24`, so it is reachable **without any default route** — which is why the
-missing routers option (ISSUE-36) does not break detection either.
-
-**Fix direction — settled: drop the dead `isEmpty()` branch** at
-`attack_commands.cpp:58-60` and the misleading comment above it. Do **not** force
-`192.168.4.1`; there is no measured benefit to it, and the branch as written can never
-execute anyway. Note also that `evilPortalGatewayIp` is **not reachable from the
-companion app at all** — it is absent from the `settings` verb's field list
-(`settings_commands.cpp:106-131`) and can only be changed from the on-device menu
-(`settings.cpp:611-620`), so no remote caller can select either value.
-
-**Left untested on purpose:** whether `192.168.4.1` behaves *better*. It cannot matter
-for the fix now chosen, and it would cost an operator-attended reflash-free menu change
-plus two more handset runs to learn nothing actionable.
-
----
-
 ### ISSUE-28 — `beginAP()` starts the DNS and HTTP servers even when the AP failed to come up
 
 **Status:** OPEN (blocking verb only) · **Severity:** medium · **Verified** by code
@@ -2428,131 +2363,15 @@ entry was originally opened for.
 
 **The real remaining defect this exposed is not the destructor at all: the blocking
 `evilportal` has exactly one exit, and it is a menu selection.** No timeout, no remote
-stop, no `returnToMenu` check. That belongs to ISSUE-6/ISSUE-1's headless-entry-point work,
-and ISSUE-35 records that the one function which *would* have given `loop()` a time-based
-exit is never called.
+stop, no `returnToMenu` check. That belongs to ISSUE-6/ISSUE-1's headless-entry-point work.
 
-**`shouldTerminate()` is still dead code** and the unexplained self-exiting portal
-remains unexplained; nothing above touches either.
-
----
-
-### ISSUE-32 — `CaptiveRequestHandler` is inert: a `const` mismatch means it never overrides
-
-**Status:** OPEN · **Severity:** low (behaviour is nearly identical; it is dead weight and
-a trap) · **Verified** by code 2026-07-30
-
-`CaptiveRequestHandler::canHandle` is declared **non-const** (`evil_portal.h:14`):
-
-```cpp
-bool canHandle(AsyncWebServerRequest *request) { return true; }
-```
-
-The base declares it **const** (`ESPAsyncWebServer.h:1533`):
-
-```cpp
-virtual bool canHandle(AsyncWebServerRequest *request) const { return false; }
-```
-
-Different signatures, so this **does not override** — there is no `override` keyword to
-have caught it. Dispatch calls `h->canHandle(request)` through the base pointer
-(`WebServer.cpp:147`), gets the base's `false`, and **skips the handler for every
-request**. Consequences:
-
-- `CaptiveRequestHandler::handleRequest` (`evil_portal.cpp:54-78`) **never runs**, so the
-  `AsyncResponseStream` it allocates at `:55` and never passes to `request->send()` — a
-  genuine per-request leak of a 1,460-byte `cbuf` plus object, by construction — **never
-  actually fires.** Recorded because fixing the `const` bug without also deleting line 55
-  would *introduce* that leak.
-- `webServer.onNotFound(...)` (`:278-294`) is therefore the **live** fallback, not dead
-  code, and it duplicates most of `handleRequest`'s logic.
-- The handler object `new`ed at `:296` is pure overhead.
-
-**Established by measurement, not just reading:** heap returned fully to its normal
-post-portal plateau after sessions containing many requests (53,143 vs the 52,231-52,991
-plateau), which a live 1.4 KB-per-request leak could not do.
-
-**Fix direction:** delete the class and the `addHandler` call, keeping `onNotFound`. Do
-*not* merely add `const`.
-
----
-
-### ISSUE-33 — `evilportal -status` reports a portal whose AP is dead as "running"
-
-**Status:** OPEN · **Severity:** medium (the app shows a healthy portal that captures
-nothing) · **Verified** on hardware 2026-07-30
-
-`evilPortalBgStatus()` (`evil_portal_bg.cpp:115-124`) keys everything off
-`bgPortal != nullptr` and never consults `apOnAir()` or `_servicesUp`. Measured
-immediately after the induced softAP failure of ISSUE-28, with the AP provably gone from
-an `nmcli` scan and HTTP refusing connections:
-
-```
-portal: running ssid:PortalTest ch:6 uptime_s:126 creds:0 cap_remaining_s:473 …
-```
-
-The portal was serving nothing and had no AP, yet reports a live cap and a running state.
-`restartWiFi()` sets `_servicesUp = false` on that path (`:314`) — the information exists
-and is simply not surfaced.
-
-**Fix direction:** have the status line carry `apOnAir()`/`_servicesUp`, and consider
-having the tick stop a portal that has lost its AP rather than leaving a zombie.
-
----
-
-### ISSUE-34 — any client on the portal AP can kill the portal with one unauthenticated request
-
-**Status:** OPEN · **Severity:** medium (remote self-DoS of a running attack) ·
-**Verified** on hardware 2026-07-30
-
-The `/ssid` route assigns `apName` from the query argument with **no validation of length
-or emptiness** and no authentication (`evil_portal.cpp:267-270`, and the identical
-unreachable copy at `:67-70`):
-
-```cpp
-if (request->hasArg("ssid")) {
-    apName = request->arg("ssid").c_str();
-    request->send(200, "text/html", ssid_POST());
-    _pendingWifiRestart = true;
-}
-```
-
-`GET /ssid?ssid=` — an empty value — therefore drives `WiFi.softAP("")`, which fails, and
-the AP goes down permanently for that portal instance. Confirmed live; it is the induction
-used to verify ISSUE-28. A victim, or anyone in range of an open AP, can end the attack.
-Enabled by default on this device (`allowSetSsid: true`, read from `/bruce.conf`).
-
-**Fix direction:** reject an empty or >32-byte SSID before assigning, and leave the
-running AP untouched when the value is invalid.
-
----
-
-### ISSUE-35 — `shouldTerminate()` is the only consumer of a duration policy `karma` actively maintains
-
-**Status:** OPEN · **Severity:** medium (karma believes it has a portal time limit and has
-none) · **Verified** by code 2026-07-30
-
-ISSUE-31 notes `shouldTerminate()` is uncalled. It is worse than an unused helper: it is
-the **sole reader** of `_baseDurationSec` and `_extendedDurationSec`
-(`evil_portal.cpp:462-471`), and `karma` populates and maintains exactly those:
-
-| Site | Call |
-|---|---|
-| `karma_attack.cpp:1792` | `setBaseDuration(attackConfig.baseDuration / 1000)` |
-| `karma_attack.cpp:1793` | `setExtendedDuration(attackConfig.extendedDuration / 1000)` |
-| `karma_attack.cpp:1709` | `checkAndExtendDuration()` — flips `_durationExtended` |
-
-A tree-wide grep finds `shouldTerminate` **only** at its declaration (`evil_portal.h:59`)
-and definition. So karma configures a base duration, extends it on activity, and
-**nothing ever checks whether the duration elapsed**. The whole policy is inert.
-
-This is also why the headless portal had to implement its own cap in `portal_cap.h`
-rather than reuse this.
-
-**Fix direction:** either call `shouldTerminate()` from `loop()`/`processRequests()` —
-which would also give the blocking verb the time-based exit ISSUE-31 identifies as
-missing — or delete the subsystem and karma's three calls into it. Do not leave it
-half-wired.
+**Update 2026-07-30 (`cedad77f`):** `shouldTerminate()` — the function this entry pointed
+at as the one that *would* have given `loop()` a time-based exit — has been **deleted**,
+not wired up. See ISSUE-35 for why: with no caller for `setBaseDuration()` on the blocking
+path it would have self-exited the portal after 15 seconds. So the blocking `evilportal`
+still has exactly one exit, a menu selection, and the remedy is now explicitly the headless
+entry point rather than a revived duration policy. The unexplained self-exiting portal
+remains unexplained; nothing above touches it.
 
 ---
 
@@ -2610,85 +2429,72 @@ rather than being its own defect.
 
 ---
 
-### ISSUE-38 — `reverseshell` corrupts the heap and reboots on every clean exit
+### ISSUE-39 — `reverseshell` leaves its AP on air after a clean exit
 
-**Status:** OPEN · **Severity:** **high** (guaranteed crash; it is the verb's *only* exit
-path) · **Verified** on hardware 2026-07-30 · **Root cause established, backtrace
-ELF-matched**
+**Status:** OPEN · **Severity:** medium (an attack AP keeps broadcasting after the
+operator ended the attack, and holds ~63 KB) · **Verified** on hardware 2026-07-30
 
-The verb now works — see below — but **ending it always crashes the device.** The operator
-pressed the documented LEFT+RIGHT Esc chord and the device rebooted. Console:
+Exposed the moment ISSUE-38 stopped crashing: nothing had ever survived the exit long
+enough to see what it left behind.
 
-```
-CORRUPT HEAP: Bad head at 0x3fcd7594. Expected 0xabba1234 got 0x00000002
-assert failed: multi_heap_free multi_heap_poisoning.c:279 (head != NULL)
-ELF file SHA256: 411d7e151          <- matches the local ELF, decode is trustworthy
-rst:0xc (RTC_SW_CPU_RST)
-```
+The exit path (`reverseShell.cpp:213-220`) stops the TCP server, closes the websockets,
+ends the web server and stops DNS — but **never brings the radio down**. There is no
+`WiFi.softAPdisconnect()`, no `WiFi.mode(WIFI_OFF)`, no `wifiDisconnect()`. So the verb
+returns to the CLI with its AP still up.
 
-Decoded, the chain is unambiguous:
-
-```
-_serialCmdsTaskLoop → SerialCli::parse → reverseshellCmdCallback (attack_commands.cpp:249)
-  → ReverseShell() at reverseShell.cpp:211        <- function returning, locals destroyed
-    → AsyncWebServer::~AsyncWebServer() (WebServer.cpp:61) → reset() (:202)
-      → list<unique_ptr<AsyncWebHandler>>::clear() → default_delete
-        → operator delete(void*)                  <- on a STACK address
-```
-
-**Root cause: a stack object is handed to a container that owns it.**
-
-- `AsyncWebSocket ws("/ws");` is a **function-local** at `reverseShell.cpp:13`.
-- `webServer.addHandler(&ws)` at `:107` passes its address to
-  `AsyncWebServer::addHandler`, which does `_handlers.emplace_back(handler)` into a
-  `std::list<std::unique_ptr<AsyncWebHandler>>` (`WebServer.cpp:96-99`) — **unconditional
-  ownership**, plain `default_delete`, no `_freeOnRemoval` consultation.
-- So `~AsyncWebServer()` calls `delete` on memory that was never `new`ed.
-
-**It is also a use-after-destruction.** `ws` is declared *after* `webServer` (`:13` vs
-`:12`), so reverse-declaration-order destruction destroys `ws` **first**, and the server
-then deletes the already-destructed object.
-
-This fires on **every** exit from the loop's `break` (`:200-207`), so there is no
-non-crashing way to end the verb. It is a **different class from ISSUE-1** — heap
-corruption from bogus ownership, not the SPI-bus mutex assert — and it is not load- or
-timing-dependent.
-
-**Contrast that proves the pattern:** the Evil Portal does the same call correctly —
-`_captiveHandler = new CaptiveRequestHandler(this); webServer.addHandler(_captiveHandler);`
-(`evil_portal.cpp:296-297`) — heap-allocated, so its teardown is safe. That is why the
-portal does not crash on `evilportal -off`.
-
-**Fix direction:** heap-allocate the websocket and let the server own it, matching the
-portal — `auto *ws = new AsyncWebSocket("/ws"); webServer.addHandler(ws);` — and do not
-delete it by hand. Do **not** simply reorder the declarations; that fixes the
-use-after-destruction but leaves `delete` being called on a stack address.
-
-**What does work, verified the same run** (clean boot, free 81,099 / dma 31,732):
+**Measured after a verified-clean exit** (ELF `f5244eb35dd10795`, device responsive,
+uptime continuous at `00:21:06`):
 
 | Check | Result |
 |---|---|
-| AP `BruceShell` on air | **yes** — WPA2, ch 1, independent `nmcli` scan |
-| DHCP lease | **192.168.4.2/24** (gateway hardcoded `192.168.4.1`, `reverseShell.cpp:15` — *not* the config value) |
-| Web UI, port 80 | **200, 3,459 bytes** |
-| TCP listener, port 23 | accepts, sends all three banner lines |
-| `/ws` → target relay | target received `whoami-probe` |
-| target → `/ws` relay | `relay-proof-8421` returned verbatim |
+| `nmcli` scan A | `BruceShell` ch 1, signal **94** |
+| `nmcli` scan B, 5 s later | `BruceShell` ch 1, signal **92** |
+| Laptop association *after the verb exited* | **succeeded** |
+| Free heap | **18,387** (vs **81,327** at boot) — largest 7,156, dma 6,644 |
 
-So the WPA2 passphrase fix is proven: the AP that could never start on any prior build now
-starts, and the relay works both directions.
+Two independent scans and a successful association rule out a stale scan cache. The
+~63 KB gap is the WiFi AP stack still resident.
 
-**Read the architecture before testing it — the device is the C2, not the shell.** Port 23
-is where the *target* dials in; the *operator* drives it from the browser WebSocket at
-`/ws` (`reverseShell.cpp:13`). `WS_EVT_DATA` (`:34-56`) pushes the command to `tcpClient`
-and reads its output back with a 3 s budget, breaking early only on a prompt ending
-`"\n> "`, `"\n$ "` or `"\n# "` (`:48`). Connecting to port 23 and typing gets no response,
-because nothing reads the operator side there — that is by design, not a defect.
+This is the same class as ISSUE-31 (Evil Portal's empty destructor leaking its whole AP +
+DNS + HTTP stack), one module along, and it has the same consequence: the device looks
+idle to the operator while still broadcasting a WPA2 AP whose passphrase is compiled in
+(`REVERSE_SHELL_AP_PASSWORD`, `reverseShell.h:10`).
 
-**No remote rescue exists.** `reverseshell` binds port 80 itself, so the Bruce WebUI and
-its `POST /cm cmnd=nav esc` are gone for the verb's whole life. Another instance of
-ISSUE-19's radio-verb rule — and with ISSUE-38 the on-device chord does not work either,
-so today the verb has **no clean exit at all**.
+**Fix direction:** tear the radio down on the way out, matching what `EvilPortal::shutdown()`
+does — and note that `wifiDisconnect()` forces `WIFI_OFF` (`wifi_common.cpp:159`), which is
+the right outcome here. **Not fixed in `cedad77f`**: it is a new finding rather than part
+of that batch's scope, and it wants its own verified flash cycle.
+
+---
+
+### ISSUE-40 — `restartWiFi()` duplicates the portal's whole route table on every rename
+
+**Status:** OPEN · **Severity:** low-medium (unbounded handler growth on a device that
+already runs out of heap after one page load) · **Verified** by code 2026-07-30 ·
+**Not observed at runtime**
+
+`EvilPortal::restartWiFi()` calls `webServer.end()` and then `setupRoutes()` again. But
+**`end()` does not clear the handler list** — only `reset()` does
+(`WebServer.cpp:199-206`, which does `_rewrites.clear(); _handlers.clear();`). And every
+`webServer.on(...)` allocates a fresh `AsyncCallbackWebHandler` and appends it
+(`:210-213` → `addHandler` → `_handlers.emplace_back`).
+
+So each `/ssid` rename appends a complete second copy of the route table, and the copies
+are never freed until the server is destroyed. `_attachHandler` takes the **first**
+match while iterating (`WebServer.cpp:145-153`), so the stale duplicates shadow the new
+ones. Behaviour stays correct — the route lambdas capture `this`, and `this` has not
+changed — so the cost is memory and lookup time, not wrong answers.
+
+That cost lands on the subsystem least able to absorb it: ISSUE-21 shows the portal has
+roughly **one** page load of headroom.
+
+**Deliberately not fixed in `cedad77f`.** The fix is small — `webServer.reset()` in place
+of `end()`, since `setupRoutes()` re-registers `onNotFound` and would restore the
+catch-all — but it changes teardown semantics on a live path, and folding it into an
+already-large flash cycle would have made any regression un-attributable.
+
+**Not yet quantified.** No run has counted handlers or measured the per-rename heap delta;
+the claim is from the library source, not a measurement. Worth confirming before fixing.
 
 ---
 
@@ -2957,3 +2763,419 @@ every sample in both captures (150s->592s over 46 samples, and 431s->592s over 1
 and heap returning to ~81,000 with the DMA block at 31,732 after every single run.
 
 ---
+
+### ISSUE-27 — the `192.168.4.1` captive-portal gateway default never applies on a configured device
+
+**Status:** RESOLVED in `cedad77f` · **Severity was:** low (dead code, not a functional
+defect) · **Verified** 2026-07-30 · **Settled against two real handsets 2026-07-30** ·
+**Fix proven on hardware** 2026-07-30
+
+`evilportalCmdCallback` sets the phone-friendly gateway **only when the stored value is
+empty** (`attack_commands.cpp:58-59`):
+
+```cpp
+if (bruceConfig.evilPortalGatewayIp.isEmpty()) {
+    bruceConfig.evilPortalGatewayIp = "192.168.4.1";
+}
+```
+
+But the config loader never leaves it empty — it defaults to **`172.0.0.1`**
+(`config.cpp:332`). So on any device whose config has been written once, the branch
+never fires and the portal comes up on `172.0.0.1`.
+
+**The portal does come up on `172.0.0.1`** — a laptop associating to it is addressed out
+of `172.0.0.0/24` and the portal answers there.
+
+⚠️ **This entry previously said the laptop "received a lease with gateway `172.0.0.1`".
+That was wrong** — a misreading of the lease. Re-measured 2026-07-30 by dumping the raw
+DHCP options (`nmcli -f DHCP4 con show`): the client **requested** the routers option
+(`requested_routers = 1`) and the server sent **no `routers` option at all**. What the
+lease actually carries is `ip_address = 172.0.0.2`, `dhcp_server_identifier = 172.0.0.1`,
+`domain_name_servers = 172.0.0.1`, `dhcp_lease_time = 7200`, `interface_mtu = 1500`. The
+`172.0.0.1` in the earlier note was the DHCP server identity and the DNS address — never
+a gateway. See ISSUE-36.
+
+**The code argues against its own behaviour.** The comment directly above that branch
+states that `172.0.0.1` breaks Android/iOS captive-portal auto-detection and that
+phones expect `192.168.4.1`. If that is correct, then the compatibility it exists to
+provide **is not in effect on this device, and never has been** — the default is
+unreachable in practice.
+
+**ANSWERED 2026-07-30 against two real handsets: `172.0.0.1` does NOT break
+captive-portal auto-detection. The code comment is false.**
+
+Portal `PortalTest` (open, ch 6) on the stock `172.0.0.1`, operator's own phones:
+
+| Handset | What happened unprompted |
+|---|---|
+| iPhone / iOS | The **captive-portal sheet opened by itself**. Page then rendered blank white. |
+| Android | A **browser opened by itself**. Page then failed to load. |
+
+Both platforms *detected* the portal without any user action, which is the entire claim
+the comment makes against `172.0.0.1`. The blank/failed page is a **separate and much
+worse defect** — the portal runs out of heap after a single page load, see ISSUE-21,
+which this test quantified. It is not a gateway-addressing problem.
+
+The detection path was measured directly and explains why the address is irrelevant:
+DNS is hijacked (`dig @172.0.0.1 connectivitycheck.gstatic.com` → `172.0.0.1`, likewise
+`captive.apple.com`), and both probes return the "portal present" answer —
+`/generate_204` → **302** (not 204), `/hotspot-detect.html` → **200** with a
+meta-refresh (not the `Success` body iOS wants). The probe target resolves onto the
+AP's own `/24`, so it is reachable **without any default route** — which is why the
+missing routers option (ISSUE-36) does not break detection either.
+
+**Fix direction — settled: drop the dead `isEmpty()` branch** at
+`attack_commands.cpp:58-60` and the misleading comment above it. Do **not** force
+`192.168.4.1`; there is no measured benefit to it, and the branch as written can never
+execute anyway. Note also that `evilPortalGatewayIp` is **not reachable from the
+companion app at all** — it is absent from the `settings` verb's field list
+(`settings_commands.cpp:106-131`) and can only be changed from the on-device menu
+(`settings.cpp:611-620`), so no remote caller can select either value.
+
+**Left untested on purpose:** whether `192.168.4.1` behaves *better*. It cannot matter
+for the fix now chosen, and it would cost an operator-attended reflash-free menu change
+plus two more handset runs to learn nothing actionable.
+
+**FIXED in `cedad77f`** — the `isEmpty()` branch and its false comment are gone from
+`attack_commands.cpp`. **Proven on hardware 2026-07-30** (ELF `dafff2ebcbd41cb2`): the
+point of the fix is that behaviour is *unchanged*, and it is. A background portal still
+comes up on `172.0.0.1`, a laptop still associates and is addressed `172.0.0.5/24`, and
+`nmcli` still reports `IP4.GATEWAY: --` (ISSUE-36, untouched). Nothing was forced to
+`192.168.4.1`, which is exactly the intent.
+
+---
+
+### ISSUE-32 — `CaptiveRequestHandler` is inert: a `const` mismatch means it never overrides
+
+**Status:** RESOLVED in `cedad77f` · **Severity was:** low (behaviour is nearly identical;
+it was dead weight and a trap) · **Verified** by code 2026-07-30 · **Fix proven on
+hardware 2026-07-30**
+
+`CaptiveRequestHandler::canHandle` is declared **non-const** (`evil_portal.h:14`):
+
+```cpp
+bool canHandle(AsyncWebServerRequest *request) { return true; }
+```
+
+The base declares it **const** (`ESPAsyncWebServer.h:1533`):
+
+```cpp
+virtual bool canHandle(AsyncWebServerRequest *request) const { return false; }
+```
+
+Different signatures, so this **does not override** — there is no `override` keyword to
+have caught it. Dispatch calls `h->canHandle(request)` through the base pointer
+(`WebServer.cpp:147`), gets the base's `false`, and **skips the handler for every
+request**. Consequences:
+
+- `CaptiveRequestHandler::handleRequest` (`evil_portal.cpp:54-78`) **never runs**, so the
+  `AsyncResponseStream` it allocates at `:55` and never passes to `request->send()` — a
+  genuine per-request leak of a 1,460-byte `cbuf` plus object, by construction — **never
+  actually fires.** Recorded because fixing the `const` bug without also deleting line 55
+  would *introduce* that leak.
+- `webServer.onNotFound(...)` (`:278-294`) is therefore the **live** fallback, not dead
+  code, and it duplicates most of `handleRequest`'s logic.
+- The handler object `new`ed at `:296` is pure overhead.
+
+**Established by measurement, not just reading:** heap returned fully to its normal
+post-portal plateau after sessions containing many requests (53,143 vs the 52,231-52,991
+plateau), which a live 1.4 KB-per-request leak could not do.
+
+**Fix direction:** delete the class and the `addHandler` call, keeping `onNotFound`. Do
+*not* merely add `const`.
+
+**FIXED in `cedad77f`** — the class (`evil_portal.h`), its `handleRequest` and the
+`addHandler`/`setFilter` call are deleted; `onNotFound` and the `_captiveHandler` member
+went with them. The `const` was deliberately *not* added, so the dormant
+`beginResponseStream` leak was never activated.
+
+**Proven behaviour-neutral on hardware 2026-07-30** (ELF `dafff2ebcbd41cb2`), which is
+the whole claim — a handler that never ran cannot be missed. Captive-portal routing after
+the deletion, measured from a laptop on the portal AP:
+
+| Request | Result |
+|---|---|
+| `GET /generate_204` | **302** → `http://172.0.0.1/` |
+| `GET /hotspot-detect.html` | **200**, 99 bytes (meta-refresh) |
+| `GET /canonical.html` | **302** → `http://172.0.0.1/` |
+
+Identical to the pre-deletion measurements recorded under ISSUE-27. Heap also returned to
+the normal post-portal plateau across three portal cycles (**53,563 / 53,303 / 53,175**
+against the documented 52,231-53,143), so the deletion introduced no leak of its own.
+
+---
+
+### ISSUE-33 — `evilportal -status` reports a portal whose AP is dead as "running"
+
+**Status:** RESOLVED in `cedad77f` · **Severity was:** medium (the app showed a healthy
+portal that captured nothing) · **Verified** on hardware 2026-07-30 · **Fix partly proven
+on hardware 2026-07-30 — see the caveat below**
+
+`evilPortalBgStatus()` (`evil_portal_bg.cpp:115-124`) keys everything off
+`bgPortal != nullptr` and never consults `apOnAir()` or `_servicesUp`. Measured
+immediately after the induced softAP failure of ISSUE-28, with the AP provably gone from
+an `nmcli` scan and HTTP refusing connections:
+
+```
+portal: running ssid:PortalTest ch:6 uptime_s:126 creds:0 cap_remaining_s:473 …
+```
+
+The portal was serving nothing and had no AP, yet reports a live cap and a running state.
+`restartWiFi()` sets `_servicesUp = false` on that path (`:314`) — the information exists
+and is simply not surfaced.
+
+**Fix direction:** have the status line carry `apOnAir()`/`_servicesUp`, and consider
+having the tick stop a portal that has lost its AP rather than leaving a zombie.
+
+**FIXED in `cedad77f`.** A `servicesUp()` accessor was added beside `apOnAir()`, and the
+status line now leads with a real state word plus both flags:
+
+```
+portal: running ap:up services:up ssid:PortalTest ch:6 uptime_s:51 creds:0 …
+```
+
+It reads `degraded` when either flag is false. The tick was **not** changed to auto-stop a
+zombie portal — that alters recovery semantics and belongs in its own change.
+
+**A second lie in the same line was found and fixed while verifying this one.** The status
+and the stop message printed `bgSsid`, captured at portal start, so both were wrong the
+moment `/ssid` renamed the AP. Caught live on ELF `dafff2ebcbd41cb2`: the AP was
+broadcasting `BBBB…` (32 chars, confirmed by `nmcli` scan) while the device reported
+`ssid:PortalTest`, and `evilportal -off` printed `portal 'PortalTest' stopped`. Both now
+read `bgPortal->getApName()`. Re-verified on ELF `f5244eb35dd10795`: renaming to
+`CleanName` gave `… ssid:CleanName …` and `portal 'CleanName' stopped.`
+
+⚠️ **The `degraded` branch is code-verified only, NOT hardware-verified — and it can no
+longer be induced.** The only known way to kill a running portal's AP was
+`GET /ssid?ssid=` with an empty value, and **ISSUE-34's fix in this same commit now
+rejects that with 400**. A 40-char SSID was previously measured *not* to fail, and 33+
+bytes is now rejected too. So the `running`/`ap:up` path is proven and the `degraded` path
+is not. Inducing it again needs a softAP failure reachable some other way.
+
+---
+
+### ISSUE-34 — any client on the portal AP can kill the portal with one unauthenticated request
+
+**Status:** RESOLVED in `cedad77f` · **Severity was:** medium (remote self-DoS of a
+running attack) · **Verified** on hardware 2026-07-30 · **Fix proven on hardware
+2026-07-30**
+
+The `/ssid` route assigns `apName` from the query argument with **no validation of length
+or emptiness** and no authentication (`evil_portal.cpp:267-270`, and the identical
+unreachable copy at `:67-70`):
+
+```cpp
+if (request->hasArg("ssid")) {
+    apName = request->arg("ssid").c_str();
+    request->send(200, "text/html", ssid_POST());
+    _pendingWifiRestart = true;
+}
+```
+
+`GET /ssid?ssid=` — an empty value — therefore drives `WiFi.softAP("")`, which fails, and
+the AP goes down permanently for that portal instance. Confirmed live; it is the induction
+used to verify ISSUE-28. A victim, or anyone in range of an open AP, can end the attack.
+Enabled by default on this device (`allowSetSsid: true`, read from `/bruce.conf`).
+
+**Fix direction:** reject an empty or >32-byte SSID before assigning, and leave the
+running AP untouched when the value is invalid.
+
+**FIXED in `cedad77f`** — the live route validates before assigning and returns `400
+invalid ssid` without touching `apName` or setting `_pendingWifiRestart`. (The identical
+copy at `:67-70` needed no fix: it lived inside `CaptiveRequestHandler`, deleted in the
+same commit under ISSUE-32.)
+
+**Proven on hardware 2026-07-30** (ELF `dafff2ebcbd41cb2`), laptop on the portal AP:
+
+| Request | Result |
+|---|---|
+| `GET /ssid?ssid=` (empty — *the request that used to kill the AP*) | **400** `invalid ssid`, 12 B, **11.8 ms** |
+| `GET /ssid?ssid=` + 33 bytes | **400** `invalid ssid`, 12 B, **4.7 ms** |
+| `GET /ssid?ssid=` + 32 bytes | **accepted** — AP renamed, confirmed by independent `nmcli` scan |
+
+The boundary is correct: 32 is a legal 802.11 SSID and is allowed, 33 is not. Decisively,
+the 33-byte request **succeeded after the empty one**, and an independent scan still found
+the AP (ch 6, signal 81) — on the previous build the empty request took the AP down for
+good. `evilportal -status` still reported `running ap:up services:up` throughout.
+
+**Note on the accepted path:** a valid rename returns `http=000` to the client, because
+`request->send()` is asynchronous and the `_pendingWifiRestart` teardown drops the
+connection before the response flushes. That is pre-existing upstream behaviour, not
+introduced here — the rename itself demonstrably works.
+
+---
+
+### ISSUE-35 — `shouldTerminate()` is the only consumer of a duration policy `karma` actively maintains
+
+**Status:** RESOLVED in `cedad77f` · **Severity was:** medium (karma believed it had a
+portal time limit and had none) · **Verified** by code 2026-07-30
+
+ISSUE-31 notes `shouldTerminate()` is uncalled. It is worse than an unused helper: it is
+the **sole reader** of `_baseDurationSec` and `_extendedDurationSec`
+(`evil_portal.cpp:462-471`), and `karma` populates and maintains exactly those:
+
+| Site | Call |
+|---|---|
+| `karma_attack.cpp:1792` | `setBaseDuration(attackConfig.baseDuration / 1000)` |
+| `karma_attack.cpp:1793` | `setExtendedDuration(attackConfig.extendedDuration / 1000)` |
+| `karma_attack.cpp:1709` | `checkAndExtendDuration()` — flips `_durationExtended` |
+
+A tree-wide grep finds `shouldTerminate` **only** at its declaration (`evil_portal.h:59`)
+and definition. So karma configures a base duration, extends it on activity, and
+**nothing ever checks whether the duration elapsed**. The whole policy is inert.
+
+This is also why the headless portal had to implement its own cap in `portal_cap.h`
+rather than reuse this.
+
+**Fix direction:** either call `shouldTerminate()` from `loop()`/`processRequests()` —
+which would also give the blocking verb the time-based exit ISSUE-31 identifies as
+missing — or delete the subsystem and karma's three calls into it. Do not leave it
+half-wired.
+
+**FIXED in `cedad77f` by DELETING the subsystem.** Removed: `shouldTerminate`,
+`checkAndExtendDuration`, `hasRecentActivity`, `setBaseDuration`, `setExtendedDuration`,
+and the members `_baseDurationSec`, `_extendedDurationSec`, `_lastActivityTime`,
+`_durationExtended`, `_launchTime` — plus karma's three call sites. `hasRecentPageView()`,
+`recordPageView()` and `_lastPageViewTime` were **kept**: karma genuinely uses them at
+`karma_attack.cpp:1721`.
+
+**Why deleting beat wiring it up**, against the fix direction's first option — wiring it
+in would have regressed two live paths:
+
+- **`loop()`** (blocking portal): nothing calls `setBaseDuration()` on it, so it would
+  have inherited the `_baseDurationSec = 15` default and **self-exited after 15 seconds**,
+  destroying the interactive verb.
+- **`processRequests()`** (background portal): `evil_portal_bg.cpp` already owns the cap
+  via `portalCapExpired()` and honours the operator's `-duration`, including `0` for
+  unlimited. The same 15 s default would have **silently overridden every `-duration`**.
+
+And the policy is not actually missing anywhere: karma implements it **inline and
+correctly** at `karma_attack.cpp:1711-1739`, against its own `activePortal->launchTime`,
+with a 15 s idle timeout, no timeout while `hasRecentPageView()` is true, and a 180 s
+absolute cap. The deleted EvilPortal-side copy was a second, never-consulted
+implementation of the same idea.
+
+**Verification is compile-and-link only, and that is the honest bar for a deletion**:
+`pio run -e smoochiee-board` SUCCESS and `pio test -e native` 21/21 with every reference
+gone (grep-confirmed across `src/` and `include/`). Karma's own timeout path was **not**
+exercised on hardware — it needs live target handsets to drive `launchTime`, and no karma
+run was performed this session.
+
+---
+
+### ISSUE-38 — `reverseshell` corrupts the heap and reboots on every clean exit
+
+**Status:** RESOLVED in `cedad77f` · **Severity was:** **high** (guaranteed crash; it was
+the verb's *only* exit path) · **Verified** on hardware 2026-07-30 · **Root cause
+established, backtrace ELF-matched** · **Fix proven on hardware 2026-07-30**
+
+The verb now works — see below — but **ending it always crashes the device.** The operator
+pressed the documented LEFT+RIGHT Esc chord and the device rebooted. Console:
+
+```
+CORRUPT HEAP: Bad head at 0x3fcd7594. Expected 0xabba1234 got 0x00000002
+assert failed: multi_heap_free multi_heap_poisoning.c:279 (head != NULL)
+ELF file SHA256: 411d7e151          <- matches the local ELF, decode is trustworthy
+rst:0xc (RTC_SW_CPU_RST)
+```
+
+Decoded, the chain is unambiguous:
+
+```
+_serialCmdsTaskLoop → SerialCli::parse → reverseshellCmdCallback (attack_commands.cpp:249)
+  → ReverseShell() at reverseShell.cpp:211        <- function returning, locals destroyed
+    → AsyncWebServer::~AsyncWebServer() (WebServer.cpp:61) → reset() (:202)
+      → list<unique_ptr<AsyncWebHandler>>::clear() → default_delete
+        → operator delete(void*)                  <- on a STACK address
+```
+
+**Root cause: a stack object is handed to a container that owns it.**
+
+- `AsyncWebSocket ws("/ws");` is a **function-local** at `reverseShell.cpp:13`.
+- `webServer.addHandler(&ws)` at `:107` passes its address to
+  `AsyncWebServer::addHandler`, which does `_handlers.emplace_back(handler)` into a
+  `std::list<std::unique_ptr<AsyncWebHandler>>` (`WebServer.cpp:96-99`) — **unconditional
+  ownership**, plain `default_delete`, no `_freeOnRemoval` consultation.
+- So `~AsyncWebServer()` calls `delete` on memory that was never `new`ed.
+
+**It is also a use-after-destruction.** `ws` is declared *after* `webServer` (`:13` vs
+`:12`), so reverse-declaration-order destruction destroys `ws` **first**, and the server
+then deletes the already-destructed object.
+
+This fires on **every** exit from the loop's `break` (`:200-207`), so there is no
+non-crashing way to end the verb. It is a **different class from ISSUE-1** — heap
+corruption from bogus ownership, not the SPI-bus mutex assert — and it is not load- or
+timing-dependent.
+
+**Contrast that proves the pattern:** the Evil Portal does the same call correctly —
+`_captiveHandler = new CaptiveRequestHandler(this); webServer.addHandler(_captiveHandler);`
+(`evil_portal.cpp:296-297`) — heap-allocated, so its teardown is safe. That is why the
+portal does not crash on `evilportal -off`.
+
+**Fix direction:** heap-allocate the websocket and let the server own it, matching the
+portal — `auto *ws = new AsyncWebSocket("/ws"); webServer.addHandler(ws);` — and do not
+delete it by hand. Do **not** simply reorder the declarations; that fixes the
+use-after-destruction but leaves `delete` being called on a stack address.
+
+**What does work, verified the same run** (clean boot, free 81,099 / dma 31,732):
+
+| Check | Result |
+|---|---|
+| AP `BruceShell` on air | **yes** — WPA2, ch 1, independent `nmcli` scan |
+| DHCP lease | **192.168.4.2/24** (gateway hardcoded `192.168.4.1`, `reverseShell.cpp:15` — *not* the config value) |
+| Web UI, port 80 | **200, 3,459 bytes** |
+| TCP listener, port 23 | accepts, sends all three banner lines |
+| `/ws` → target relay | target received `whoami-probe` |
+| target → `/ws` relay | `relay-proof-8421` returned verbatim |
+
+So the WPA2 passphrase fix is proven: the AP that could never start on any prior build now
+starts, and the relay works both directions.
+
+**Read the architecture before testing it — the device is the C2, not the shell.** Port 23
+is where the *target* dials in; the *operator* drives it from the browser WebSocket at
+`/ws` (`reverseShell.cpp:13`). `WS_EVT_DATA` (`:34-56`) pushes the command to `tcpClient`
+and reads its output back with a 3 s budget, breaking early only on a prompt ending
+`"\n> "`, `"\n$ "` or `"\n# "` (`:48`). Connecting to port 23 and typing gets no response,
+because nothing reads the operator side there — that is by design, not a defect.
+
+**No remote rescue exists.** `reverseshell` binds port 80 itself, so the Bruce WebUI and
+its `POST /cm cmnd=nav esc` are gone for the verb's whole life. Another instance of
+ISSUE-19's radio-verb rule. **This is also why verifying the fix required an operator at
+the board** — the exit is reachable only by the physical LEFT+RIGHT chord.
+
+**FIXED in `cedad77f`.** `AsyncWebSocket` is now heap-allocated with
+`new (std::nothrow)` and handed to `addHandler()`, which owns it; it is never deleted by
+hand. It is allocated **after** the AP is up, so the two early `return false` paths above
+it (`softAPConfig` / `softAP` failure) cannot leak it, and a null allocation is reported
+and bails out rather than dereferencing.
+
+The root cause was re-confirmed against the actual library source in this build before
+changing anything, not just from the backtrace: `addHandler` is
+`_handlers.emplace_back(handler)` into `std::list<std::unique_ptr<AsyncWebHandler>>`
+(`WebServer.cpp:96-99`), and `~AsyncWebServer()` calls `reset()`, which does
+`_handlers.clear()` (`:199-206`).
+
+**Proven on hardware 2026-07-30**, ELF `f5244eb35dd10795`, operator at the board.
+`reverseshell` dispatched over BLE, `BruceShell` confirmed on air (ch 1, WPA2, independent
+`nmcli` scan), then the LEFT+RIGHT Esc chord pressed:
+
+| Check | Before (`411d7e151dbc2356`) | After (`f5244eb35dd10795`) |
+|---|---|---|
+| `CORRUPT HEAP: Bad head` | printed | **absent** |
+| `assert failed: multi_heap_free` | printed | **absent** |
+| `rst:0xc (RTC_SW_CPU_RST)` + boot banner | printed | **absent** |
+| Uptime after the press | reset to ~0 | **`00:00:21:06`, continuous** |
+| Serial task after the press | dead (rebooting) | free — BLE answered `uptime` in **122 ms** |
+
+The **uptime continuity is the decisive evidence**: `t=1,266,545 ms` unbroken across the
+press means the device never reset. The console captured on `/dev/ttyACM0` throughout did
+not grow by a single line during the exit. `ReverseShell()` returned normally through the
+`break` at `:200-207` — precisely the path that previously called `delete` on a stack
+address.
+
+**A separate defect was exposed by the working exit: the verb leaks its AP.** See
+**ISSUE-39**. That is a pre-existing bug the crash was masking — until now nothing ever
+survived the exit long enough to observe what it left behind.
+
+---
+
