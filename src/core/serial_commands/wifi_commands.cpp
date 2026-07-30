@@ -70,6 +70,7 @@ uint32_t webuiCallback(cmd *c) {
     Argument arg = cmd.getArgument("noAp");
     bool noAp = arg.isSet();
     bool background = cmd.getArgument("bg").isSet();
+    bool selftest = cmd.getArgument("selftest").isSet();
 
     // Parenthesised because `+` binds tighter than `?:`: without them the whole
     // concatenation became the ternary's condition and the client received a bare
@@ -79,7 +80,7 @@ uint32_t webuiCallback(cmd *c) {
     // Returned, not discarded: this is the one attack-adjacent verb whose
     // `[CLI] Result:` can now mean something, since startWebUi knows whether port
     // 80 is listening.
-    return startWebUi(!noAp, background); // without bg: quits when check(EscPress)
+    return startWebUi(!noAp, background, selftest); // without bg: quits when check(EscPress)
 }
 #if !defined(LITE_VERSION)
 uint32_t scanHostsCallback(cmd *c) {
@@ -132,6 +133,7 @@ void createWifiCommands(SimpleCLI *cli) {
     webuiCmd.addFlagArg("noAp");
     webuiCmd.addFlagArg("off");
     webuiCmd.addFlagArg("bg");
+    webuiCmd.addFlagArg("selftest");
 
     Command wifiCmd = cli->addCommand("wifi", wifiCallback);
     wifiCmd.addPosArg("status");

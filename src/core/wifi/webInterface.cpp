@@ -99,15 +99,15 @@ void loopOptionsWebUi() {
         bool opt = WiFi.getMode() - 1;
         options = {
             {"Stop WebUI", stopWebUi},
-            {"WebUi screen", lambdaHelper(startWebUi, opt, false)}
+            {"WebUi screen", lambdaHelper(startWebUi, opt, false, false)}
         };
         addOptionToMainMenu();
         loopOptions(options);
         return;
     }
     options = {
-        {"my Network", lambdaHelper(startWebUi, false, false)},
-        {"AP mode",    lambdaHelper(startWebUi, true, false)},
+        {"my Network", lambdaHelper(startWebUi, false, false, false)},
+        {"AP mode",    lambdaHelper(startWebUi, true, false, false)},
     };
 
     loopOptions(options);
@@ -772,7 +772,7 @@ static void reportWebUiStart(const WebUiStartReport &r) {
 **  Function: startWebUi
 **  Start the WebUI
 **********************************************************************/
-bool startWebUi(bool mode_ap, bool background) {
+bool startWebUi(bool mode_ap, bool background, bool selftest) {
     WebUiStartReport report{};
     report.required = RADIO_WIFI_MIN_DMA_BLOCK;
     report.apMode = mode_ap;
@@ -828,7 +828,11 @@ bool startWebUi(bool mode_ap, bool background) {
         // early leaving _pcb null, so state() reads CLOSED — the one exact signal
         // that port 80 is not listening, as against a heap figure that merely
         // correlates with it.
-        report.tcpState = (uint8_t)server->state();
+        // -selftest forces the branch below without stubbing begin(): the server is
+        // genuinely started and genuinely unwound, which is the half that has to be
+        // proven. ISSUE-28's beginAP() guard is still UNVERIFIED because nothing can
+        // reach it from the CLI; this exists so gate D does not join it.
+        report.tcpState = selftest ? (uint8_t)0 : (uint8_t)server->state();
         if (!webUiListening(report.tcpState)) {
             report.result = WebUiStartResult::FailedNotListening;
             report.dmaBlock = radioLargestDmaBlock();
