@@ -22,6 +22,13 @@ hashes exactly (table in `BRUCELINK.md` §Testing), because `esp_app_desc`'s tim
 the framework's, not the local compile time. So a stored core dump stays decodable: check
 out its commit, rebuild, and `addr2line` against that ELF.
 
+**As left on 2026-07-30:** the unit is flashed with ELF **`fabcc0003`** = commit
+`6a7397a8`, confirmed on-device (`crashlog` reported `running_elf=fabcc0003 match=yes`
+against a deliberate `-selftest` dump). The coredump partition is **empty** — cleared
+after that test — and `free` read `81,063` with `dma largest 31,732`, matching the
+documented BLE-API-only plateau. Keep the flashed ELF and the tree in step, or a real
+crash will report `match=NO` and its backtrace cannot be trusted against `.pio`.
+
 ---
 
 ## The three rules that override everything
