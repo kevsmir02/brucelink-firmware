@@ -10,6 +10,8 @@
 #include "core/utils.h"
 #include "core/wifi/wifi_common.h" // using common wifisetup
 #include "core/wifi/ws_events.h"
+#include "core/radio_mem.h"
+#include "core/wifi/webui_gate.h"
 #include "esp_task_wdt.h"
 #include "webFiles.h"
 #include <MD5Builder.h>
@@ -745,15 +747,47 @@ void configureWebServer() {
     Serial.println("Webserver started");
 }
 
+// Every WebUI start outcome goes through here. Four destinations because no single
+// one reaches everybody on this board: `Serial` is the native USB-CDC port that
+// nothing is attached to (ISSUE-22), the CLI reply is invisible to anyone watching
+// the console, and the console is invisible to the app.
+static void reportWebUiStart(const WebUiStartReport &r) {
+    const String line = String(formatWebUiStartReport(r).c_str());
+    const bool ok = r.result == WebUiStartResult::Started;
+
+    // log_e for failures because CORE_DEBUG_LEVEL=1 compiles out every level below
+    // ERROR; RAM_LOGF for the success line, which reaches the same console via the
+    // UART0 mirror without misreporting itself as an error.
+    if (ok) RAM_LOGF("%s", line.c_str());
+    else log_e("%s", line.c_str());
+
+    pushWsLog(line, ok ? "info" : "err");
+    if (serialDevice) serialDevice->println(line);
+    // false, never true: waitKeyPress spins on check(AnyKeyPress) and would hold the
+    // serial task here with no BLE dismissal available.
+    if (!ok) displayError(line, false);
+}
+
 /**********************************************************************
 **  Function: startWebUi
 **  Start the WebUI
 **********************************************************************/
-void startWebUi(bool mode_ap, bool background) {
+bool startWebUi(bool mode_ap, bool background) {
+    WebUiStartReport report{};
+    report.required = RADIO_WIFI_MIN_DMA_BLOCK;
+    report.apMode = mode_ap;
+
     bool keepWifiConnected = false;
     if (WiFi.status() != WL_CONNECTED) {
-        if (mode_ap) wifiConnectMenu(WIFI_AP);
-        else wifiConnectMenu(WIFI_STA);
+        // The return was discarded here, so neither the STA memory gate nor a failed
+        // softAP() could reach this caller and the WebUI was built on top of an
+        // interface that might not exist.
+        if (!wifiConnectMenu(mode_ap ? WIFI_AP : WIFI_STA)) {
+            report.result = WebUiStartResult::WifiBringUpFailed;
+            report.dmaBlock = radioLargestDmaBlock();
+            reportWebUiStart(report);
+            return false;
+        }
     } else {
         keepWifiConnected = true;
     }
@@ -766,6 +800,22 @@ void startWebUi(bool mode_ap, bool background) {
 
         Serial.println("Configuring Webserver ...");
         RAM_LOG("webui pre-alloc");
+
+        // Sampled here rather than at entry: this is the point ISSUE-12's
+        // `webui pre-alloc` figures were taken, with the AP already up, so the gate
+        // is directly comparable to the register's table. At function entry the
+        // block is still pre-AP and was ample in both failing runs.
+        report.dmaBlock = radioLargestDmaBlock();
+        if (!webUiDmaSufficient(report.dmaBlock, report.required)) {
+            report.result = WebUiStartResult::RefusedLowDmaPreAlloc;
+            reportWebUiStart(report);
+            // Refusing must not leave an AP we raised on air: ISSUE-31 and ISSUE-39
+            // are both that mistake, and `free` failing to return to its idle
+            // plateau was the whole tell.
+            if (!keepWifiConnected) wifiDisconnect();
+            return false;
+        }
+
         if (psramFound()) server = (AsyncWebServer *)ps_malloc(sizeof(AsyncWebServer));
         else server = (AsyncWebServer *)malloc(sizeof(AsyncWebServer));
 
@@ -774,12 +824,33 @@ void startWebUi(bool mode_ap, bool background) {
         configureWebServer();
         RAM_LOG("webui post-configure");
 
+        // configureWebServer() ends in server->begin(). A failed begin() returns
+        // early leaving _pcb null, so state() reads CLOSED — the one exact signal
+        // that port 80 is not listening, as against a heap figure that merely
+        // correlates with it.
+        report.tcpState = (uint8_t)server->state();
+        if (!webUiListening(report.tcpState)) {
+            report.result = WebUiStartResult::FailedNotListening;
+            report.dmaBlock = radioLargestDmaBlock();
+            reportWebUiStart(report);
+            stopWebUi();
+            if (!keepWifiConnected) wifiDisconnect();
+            return false;
+        }
+
+        // Only now. Set unconditionally before, this told display.cpp:985 and
+        // loopOptionsWebUi() that a server existed when none did.
         isWebUIActive = true;
     }
+
+    report.result = WebUiStartResult::Started;
+    report.dmaBlock = radioLargestDmaBlock();
+    report.tcpState = (uint8_t)server->state();
+    reportWebUiStart(report);
     tft.setLogging();
     drawWebUiScreen(mode_ap);
 #ifdef HAS_SCREEN // Headless always run in the background!
-    if (background) return;
+    if (background) return true;
     while (!check(EscPress)) {
         // nothing here, just to hold the screen until the server is on.
         vTaskDelay(pdMS_TO_TICKS(70));
@@ -799,4 +870,5 @@ void startWebUi(bool mode_ap, bool background) {
         if (!keepWifiConnected) { wifiDisconnect(); }
     }
 #endif
+    return true;
 }

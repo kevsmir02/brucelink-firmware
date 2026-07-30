@@ -25,6 +25,6 @@ void configureWebServer();
 // background = true starts the server and returns immediately, instead of
 // holding the screen until ESC. Same end state as picking "Run in background"
 // from the on-screen menu; lets a remote client re-arm the WebUI it stopped.
-void startWebUi(bool mode_ap = false, bool background = false);
+bool startWebUi(bool mode_ap = false, bool background = false);
 void stopWebUi();
 void cleanlyStopWebUiForWiFiFeature();

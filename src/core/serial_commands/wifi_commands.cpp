@@ -76,9 +76,10 @@ uint32_t webuiCallback(cmd *c) {
     // "AP"/"STA" with the prefix silently dropped.
     serialDevice->println(String("Starting Web UI ") + (!noAp ? "AP" : "STA"));
     serialDevice->println("Press ESC to quit");
-    startWebUi(!noAp, background); // without bg: quits when check(EscPress)
-
-    return true;
+    // Returned, not discarded: this is the one attack-adjacent verb whose
+    // `[CLI] Result:` can now mean something, since startWebUi knows whether port
+    // 80 is listening.
+    return startWebUi(!noAp, background); // without bg: quits when check(EscPress)
 }
 #if !defined(LITE_VERSION)
 uint32_t scanHostsCallback(cmd *c) {
