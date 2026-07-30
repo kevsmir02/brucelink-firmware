@@ -64,7 +64,7 @@
 - Consumes: nothing.
 - Produces: `struct CrashSummaryView`; `std::string formatCrashSummary(const CrashSummaryView &)`; `const char *resetReasonName(int)`. Task 2 is the only consumer.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `test/test_crash_report/test_crash_report.cpp`:
 
@@ -164,12 +164,12 @@ int main(int, char **) {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `pio test -e native -f test_crash_report`
 Expected: FAIL — `core/crash_report.h: No such file or directory`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Create `src/core/crash_report.h`:
 
@@ -247,12 +247,12 @@ static inline std::string formatCrashSummary(const CrashSummaryView &v) {
 #endif
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `pio test -e native`
 Expected: PASS. 28 cases total (21 baseline + 7 new).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/core/crash_report.h test/test_crash_report/test_crash_report.cpp
@@ -281,7 +281,7 @@ case this has to survive."
 - Consumes: `formatCrashSummary()`, `resetReasonName()`, `CrashSummaryView` from Task 1. `serialDevice` from `<globals.h>` (declared `include/globals.h:74`).
 - Produces: `void createCrashCommands(SimpleCLI *cli)`; `void reportBootCrashState()`.
 
-- [ ] **Step 1: Write the header**
+- [x] **Step 1: Write the header**
 
 Create `src/core/serial_commands/crash_commands.h`:
 
@@ -301,7 +301,7 @@ void reportBootCrashState();
 #endif
 ```
 
-- [ ] **Step 2: Write the implementation**
+- [x] **Step 2: Write the implementation**
 
 Create `src/core/serial_commands/crash_commands.cpp`:
 
@@ -406,7 +406,7 @@ void createCrashCommands(SimpleCLI *cli) {
 #endif
 ```
 
-- [ ] **Step 3: Register the verb**
+- [x] **Step 3: Register the verb**
 
 In `src/core/serial_commands/cli.cpp`, add the include alongside the others (keep the list alphabetical among its neighbours — insert after `#include "core/sd_functions.h"`):
 
@@ -422,7 +422,7 @@ Then in `SerialCli::setup()`, add to the unconditional block at `:38-47`, after 
 
 Registered unconditionally, not behind `#ifndef LITE_VERSION`: a crash report is worth more on a stripped build, not less.
 
-- [ ] **Step 4: Call the boot hook**
+- [x] **Step 4: Call the boot hook**
 
 In `src/main.cpp`, add the include near the other serial_commands includes, then insert the call immediately before `RAM_LOG("setup-end");` (currently `:592`), *outside* the `#if !defined(LITE_VERSION)` block that closes on the line above:
 
@@ -432,7 +432,7 @@ In `src/main.cpp`, add the include near the other serial_commands includes, then
     RAM_LOG("setup-end");
 ```
 
-- [ ] **Step 5: Build and verify the verb registered**
+- [x] **Step 5: Build and verify the verb registered**
 
 Run: `pio run -e smoochiee-board`
 Expected: exit 0.
@@ -440,7 +440,7 @@ Expected: exit 0.
 Run: `pio test -e native`
 Expected: PASS, 28 cases — confirms the new header did not break the host build.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/core/serial_commands/crash_commands.h src/core/serial_commands/crash_commands.cpp \
