@@ -66,8 +66,8 @@ Verified end-to-end on hardware, safe to expose as a one-tap action.
 
 | Capability | Failure | Entry |
 |---|---|---|
-| `deauth` | Crashes the device (SPI mutex, cross-task) | ISSUE-1 |
-| `evilportal` (**blocking** form) | Crashes **under load** with BLE armed (ISSUE-1) — still draws from the serial task, unchanged by the headless work. Also commits DNS/HTTP state even when the AP failed to start (ISSUE-28). Use `-bg` instead |
+| `deauth` | **Row corrected 2026-07-30 — it said only "Crashes the device" and recorded none of the mitigation.** The cross-task SPI mutex fix (`2d9422ea`, ELF `5186685c0fdf19c2`) took it from crashing 2/2 in 20–70 s to **21 min clean across ~40 main-loop status-bar redraws** — the exact collision. ISSUE-1 stays open because a negative result against a race is not proof, **not** because the verb is known-broken. Still don't ship it one-tap: it holds the serial task, needs a button at the device, and `evilportal`-under-load is still unconfirmed | ISSUE-1 |
+| `evilportal` (**blocking** form) | Crashed **under load** with BLE armed on the pre-fix build (ISSUE-1) — still draws from the serial task, unchanged by the headless work. The `2d9422ea` mutex fix applies to it too, but **its under-load case was never re-confirmed**: the attempt starved to 163 bytes free and exited before the drawing could collide (ISSUE-21), so this row is "unverified after the fix", not "known broken". Use `-bg` instead, which removes the precondition entirely |
 | `badusb` (USB HID) | Types nothing. No longer hangs — returns in 9.3 s (`b1c825c8`) | ISSUE-20 |
 | `badusb` (BLE HID) | **Not reachable** — no CLI path exists at all | ISSUE-20 |
 | Serial CLI over USB | **Does not exist on this board.** BLE is the only command interface | ISSUE-22 |

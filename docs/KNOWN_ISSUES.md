@@ -23,6 +23,7 @@ CC1101/NRF24/PN532/IR/GPS. Built as env `smoochiee-board`.
 ### ISSUE-1 — `deauth` crashes the device (FreeRTOS assert)
 
 **Status:** OPEN · **Severity:** critical · **Verified** 2026-07-29 · **Reproduced 2/2**
+· **Mitigated but deliberately not closed** — see §Fix applied below
 
 Sending `deauth` over the BLE CLI does not merely block the serial task, as §5.2 of
 the API contract described until now. It **panics the device and reboots it**,
@@ -207,6 +208,40 @@ condition through a different verb. Neither run produced an `assert failed`,
 **Kept OPEN deliberately.** This is a probabilistic result against a race, not a proof.
 The `evilportal`-under-load case remains unconfirmed for an unrelated reason: that run
 starved itself to 163 bytes and exited before the drawing could collide (ISSUE-21).
+
+**The symbol is `tftMutex`** (`lib/TFT_eSPI/TFT_eSPI.cpp:72`, created at `:646`), named
+here because the paragraphs above describe the mechanism without ever writing it down,
+so `grep tftMutex docs/` found nothing and a 2026-07-30 audit wrongly concluded no fix
+existed. It guards six entry points: `begin/end_tft_write` (`:95`/`:126`),
+`begin/end_nin_write` (`:109`/`:143`), `begin/end_tft_read` (`:164`/`:187`) and
+`begin/end_touch_read_write` (`Extensions/Touch.cpp:30`/`:51` — compiled here, because
+`pins_arduino.h:77` defines `TOUCH_CS` as `-1` and the guard is `#ifdef`).
+
+**The mutex itself is upstream, not fork work.** It arrives in `517cec01` (the mQuickJS
+runtime change, #1989) as a *call*-scoped mutex. `2d9422ea` re-scoped it to the SPI
+transaction and extended it to the `nin_write` and `tft_read` pairs, which upstream left
+with no protection at all.
+
+**A latent trap worth knowing about — audited 2026-07-30, inert today.** The library has
+**32** live `begin_tft_write()` calls against **57** live `end_tft_write()` calls,
+because 20 sites comment the begin out so the Sprite class can reuse the function
+(`:2330, 2404, 2472, 2548, 2600, 2647, 2668, 2694, 2716, 2758, 2815, 2839, 2862, 2886,
+3280, 3318, 3411, 3551, 3938, 5355`) and `drawArc:4133` sets `inTransaction` with no
+begin. So the trailing per-call `xSemaphoreGiveRecursive` runs ~25 times more often than
+its take.
+
+That is **harmless as the code stands**: every unmatched give lands on recursion count 0,
+where FreeRTOS `xQueueGiveMutexRecursive` returns `pdFAIL` and does nothing. Turning it
+harmful needs an unmatched give while an *outer* transaction holds count 1, and no such
+nesting exists here — verified: **zero** `startWrite()`/`endWrite()` call sites in `src/`
+and `boards/`; `TFT_eSprite` unused in `src/`, so `lockTransaction` (its only true-setter
+is `Extensions/Sprite.cpp:42`) is always false and `inTransaction = lockTransaction`
+always restores to false; and the only internal caller of a comment-out composite is
+`drawString` (5 × `drawRect` at `:5781-5793`, in its padding-debug block), which holds no
+transaction anywhere in `:5584-5810`.
+
+**It goes live the moment anyone adds `startWrite()`/`endWrite()` to `src/`.** Don't,
+without re-reading this.
 
 **Retired for the HEADLESS portal path only — 2026-07-30, ELF `76d42c72f2b4a8a4`.**
 `evilportal -bg` was run under load with a client associated and pages being fetched,
@@ -2340,7 +2375,28 @@ stub on this board (`mykeyboard.cpp:1454`).
 
 **Candidates, none discriminated:** a blocking `options[chosen].operation()`
 (`display.cpp:738-748`); a spin inside `ConfigMenu::optionsMenu()`'s `while (true)`; a
-latched `forceMenuOption`; a latched button global (ISSUE-29).
+latched `forceMenuOption`; a latched button global (ISSUE-29); or a leaked `tftMutex`
+reference (below).
+
+**Candidate added 2026-07-30: a leaked `tftMutex` reference.** Every take uses
+`portMAX_DELAY` (`lib/TFT_eSPI/TFT_eSPI.cpp:96, 99, 110, 113, 165, 170`), so a reference
+that is taken and never given blocks **every** other task at `begin_tft_write` forever.
+That would produce this entry's whole evidence table — static screen, frozen clock, dead
+buttons, BLE answering because it runs on the serial task, no panic and no watchdog — and
+it explains the one result that defeated the memory hypothesis: **a mutex wait is not a
+memory condition**, so freeing 43 KB could not have helped. The timing also fits: the
+mutex was re-scoped in `2d9422ea` on 2026-07-29 19:41 and this wedge was seen 2026-07-30.
+
+**Marked SUSPECTED and ranked below the others, because the audit that raised it also
+failed to find a leak path.** The begin/end imbalance in that file runs in the *safe*
+direction — 57 gives against 32 takes, so it over-releases rather than leaking — and no
+take-without-give site was identified. Treat this as "the mechanism that would explain
+the symptoms if a leak exists", not as evidence that one does.
+
+**Cheap discriminator if it recurs:** a wedged main loop with BLE alive is already the
+signature; add `free` — if it answers, the serial task holds no display reference, and a
+`tftMutex` leak is then the *only* candidate consistent with the main loop being stuck at
+`begin_tft_write`.
 
 **Why no backtrace exists:** nothing panics and no watchdog fires, so there is no
 automatic dump. The one line that would discriminate the first candidate,

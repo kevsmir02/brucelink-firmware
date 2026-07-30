@@ -253,9 +253,20 @@ with `-DRF_DEBUG=1` if you want them.
   `heap_poll.py`. Needs `pip install bleak`. `probe_verbs.py` is deliberately
   partial — it excludes destructive, blocking and menu-opening verbs, and that
   exclusion list should stay excluded from any blind sweep.
+- **A panic also writes a full ELF core dump to flash, and `crashlog` reads it back.**
+  `custom_16Mb.csv` has a 64 KB `coredump` partition and the framework sdkconfig sets
+  `ESP_COREDUMP_ENABLE_TO_FLASH` + `DATA_FORMAT_ELF` + `CHECK_BOOT` — this was true from
+  the fork's first commit and nothing read it until `0f4936d1`. `crashlog` over BLE
+  reports the faulting task, `exc_pc`, the on-device Xtensa backtrace, the stored dump's
+  `app_elf_sha256`, **and** the running firmware's own sha with a `match=` verdict, so a
+  decode can be validated without a console attached. `crashlog -clear` erases it.
+  Caveats: a *wedge* panics nothing and writes no dump (so this does not help ISSUE-30);
+  `CAPTURE_DRAM` is off, so stacks and registers only; and the partition is overwritten
+  by the next crash, so read it before deliberately provoking another.
 - **Crash-testing a verb**: dispatch it over BLE while capturing `/dev/ttyACM0`
-  (115200 raw). A panic prints `assert failed` / `Backtrace:` there and nowhere else.
-  Decode with:
+  (115200 raw). A panic prints `assert failed` / `Backtrace:` there — and, since
+  `0f4936d1`, also survives in the core dump above, so a missed capture is no longer
+  fatal to the investigation. Decode with:
 
   ```sh
   ~/.platformio/packages/toolchain-xtensa-esp32s3/bin/xtensa-esp32s3-elf-addr2line \
@@ -270,14 +281,22 @@ with `-DRF_DEBUG=1` if you want them.
   `return true` and discards the outcome (`attack_commands.cpp:147-175`). Observed:
   `reverseshell` reported `TRUE` 30 ms after its AP creation failed outright. It is a
   *completion* signal only.
-- **`deauth` and `evilportal`-under-load crash the device.** Menu-dispatcher verbs
-  draw to the TFT from the serial task while the main loop draws the same display over
-  the same SPI bus; the bus mutex ends up released by the wrong task and FreeRTOS
-  asserts. **The trigger is any sustained drawing from the serial task, not `drawArc`
-  specifically** — `evilportal` died through `drawStatusBar`/`drawBatteryStatus`, the
-  same status bar the main loop repaints on its 30 s timer. **Therefore an idle test
-  proves nothing**, and every "survivor" in the seven-verb sweep was tested idle for
-  90 s. Both backtraces in `docs/KNOWN_ISSUES.md` §ISSUE-1.
+- **`deauth` and `evilportal`-under-load crashed the device, and are now mitigated —
+  but ISSUE-1 is still open, on purpose.** Menu-dispatcher verbs draw to the TFT from the
+  serial task while the main loop draws the same display over the same SPI bus; the bus
+  mutex ended up released by the wrong task and FreeRTOS asserted. **The trigger is any
+  sustained drawing from the serial task, not `drawArc` specifically** — `evilportal`
+  died through `drawStatusBar`/`drawBatteryStatus`, the same status bar the main loop
+  repaints on its 30 s timer. **Therefore an idle test proves nothing**, and every
+  "survivor" in the seven-verb sweep was tested idle for 90 s.
+  **`2d9422ea` re-scoped `tftMutex` from the call to the SPI transaction** and took
+  `deauth` from crashing 2/2 in 20–70 s to **21 min clean across ~40 main-loop redraws**
+  (ELF `5186685c0fdf19c2`); `blesniffer` went 13 min. The entry stays open because that
+  is a probabilistic result against a race, and because blocking `evilportal` under load
+  was never re-confirmed. **Do not read "ISSUE-1 open" as "no fix exists"** — a 2026-07-30
+  audit made exactly that mistake, because the docs described the mechanism without ever
+  naming `tftMutex`. Both backtraces and the full mitigation record are in
+  `docs/KNOWN_ISSUES.md` §ISSUE-1.
 - **An on-device chord is not a reliable way to exit a blocking verb.** The main loop keeps
   running the menu UI while a verb holds the serial task, so a physical press drives *both*
   it and the verb's own `check()` — during the ISSUE-39 test the operator's LEFT+RIGHT was
