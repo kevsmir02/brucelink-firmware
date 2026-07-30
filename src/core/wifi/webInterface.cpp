@@ -553,6 +553,17 @@ void configureWebServer() {
                     if (!LongPress) vTaskDelay(pdMS_TO_TICKS(190));
                     else vTaskDelay(pdMS_TO_TICKS(50));
                 }
+                // Release the button, which nothing else does. check() clears a flag as
+                // it reads it, but the main menu never reads EscPress — its check is
+                // gated on menuType != MENU_TYPE_MAIN (display.cpp) — so a `nav esc`
+                // delivered there used to latch true forever and then fire inside
+                // whatever menu the operator opened next (ISSUE-29). Leaving the flag
+                // high also denies the release edge that ScrollableTextArea waits for
+                // before it will accept a press, which is why a single pulse could not
+                // release a blocked verb (ISSUE-19).
+                *var = false;
+                AnyKeyPress = false;
+                SerialCmdPress = false;
             } else {
                 if (parseSerialCommand(cmnd, false)) {
                     request->send(200, "text/plain", "command " + cmnd + " queued");

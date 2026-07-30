@@ -36,8 +36,10 @@ JsonDocument BruceConfig::toJson() const {
     JsonObject _webUI = setting["webUI"].to<JsonObject>();
     _webUI["user"] = webUI.user;
     _webUI["pwd"] = webUI.pwd;
-    JsonObject _webUISessions = setting["webUISessions"].to<JsonObject>();
-    for (size_t i = 0; i < webUISessions.size(); i++) { _webUISessions[String(i + 1)] = webUISessions[i]; }
+    // webUISessions is intentionally NOT serialised. It is RAM-only now (ISSUE-18),
+    // so writing it here would reintroduce the flash traffic this change removes, and
+    // it also kept live bearer tokens in a dump any unauthenticated BLE client can
+    // read (ISSUE-23).
 
     JsonObject _wifiAp = setting["wifiAp"].to<JsonObject>();
     _wifiAp["ssid"] = wifiAp.ssid;
@@ -267,14 +269,15 @@ void BruceConfig::fromFile(bool checkFS) {
         log_e("Fail");
     }
 
+    // Sessions are RAM-only now (ISSUE-18) and are no longer written by toJson(), so
+    // an absent key is the normal case and must not be counted as a missing field —
+    // counting it would mark the config dirty on every single boot. Any tokens still
+    // present in an older config file are deliberately discarded rather than loaded:
+    // they are stale bearer tokens from a previous boot.
     if (!setting["webUISessions"].isNull()) {
-        webUISessions.clear();
-        JsonObject webUISessionsObj = setting["webUISessions"].as<JsonObject>();
-        for (JsonPair kv : webUISessionsObj) { webUISessions.push_back(kv.value().as<String>()); }
-    } else {
-        count++;
-        log_e("Fail");
+        count++; // legacy key still on disk; the re-save this triggers removes it
     }
+    webUISessions.clear();
 
     if (!setting["wifiAp"].isNull()) {
         JsonObject wifiApObj = setting["wifiAp"].as<JsonObject>();
@@ -858,11 +861,16 @@ void BruceConfig::removeQrCodeEntry(const String &menuName) {
     saveFile();
 }
 
+// Session tokens live in RAM only. Persisting them wrote the ENTIRE config file to
+// LittleFS on every login, and under the memory pressure the WebUI itself creates
+// that fopen() cannot allocate, at which point newlib calls abort() and takes the
+// device down (ISSUE-18, ELF-matched backtrace). A session token is a
+// session-lifetime value, so surviving a reboot was never worth a flash write —
+// and dropping them on reboot is the more correct behaviour anyway.
 void BruceConfig::addWebUISession(const String &token) {
     webUISessions.push_back(token);
     // Limit to maximum 5 sessions - remove oldest (first element) if exceeded
     if (webUISessions.size() > 5) { webUISessions.erase(webUISessions.begin()); }
-    saveFile();
 }
 
 void BruceConfig::removeWebUISession(const String &token) {
@@ -872,7 +880,6 @@ void BruceConfig::removeWebUISession(const String &token) {
             break;
         }
     }
-    saveFile();
 }
 
 bool BruceConfig::isValidWebUISession(const String &token) {
@@ -887,13 +894,15 @@ bool BruceConfig::isValidWebUISession(const String &token) {
         return true; // Already most recent, no changes needed
     }
 
-    // Move token to end and save
+    // Move token to end (most-recently-used)
     webUISessions.erase(it);
     webUISessions.push_back(token);
 
     // Limit to maximum 10 sessions
     if (webUISessions.size() > 10) { webUISessions.erase(webUISessions.begin()); }
 
-    saveFile();
+    // Deliberately no saveFile(). This runs on EVERY authenticated request whose
+    // token is not already the most recent one, so the flash write documented in
+    // ISSUE-18 for POST /login was in fact reachable from any authenticated route.
     return true;
 }

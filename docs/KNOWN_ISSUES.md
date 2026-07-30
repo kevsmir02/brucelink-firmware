@@ -307,12 +307,29 @@ maritest app does exactly this in `src/flows/hardware.ts`.
 
 ### ISSUE-5 — `deauth <target>` argument is accepted and discarded
 
-**Status:** OPEN · **Severity:** low · **Verified** by code
+**Status:** RESOLVED 2026-07-30 · **Severity:** low · **Verified** by code
 
 `deauthCmdCallback` ignores its `target` argument entirely and calls `wifi_atk_menu()`
 (`attack_commands.cpp:152-155`). The CLI advertises a parameter that has no effect.
 
 Superseded in practice by ISSUE-1 — the verb cannot be used at all right now.
+
+**Fix applied 2026-07-30, ELF `411d7e151dbc2356`.** A non-empty `target` is now
+rejected with an explicit error instead of being silently dropped. Honouring it was
+not an option — `wifi_atk_menu()` takes no target and picks one on the device — so
+the honest choice was to stop advertising a capability that does not exist.
+
+Verified on hardware over BLE:
+
+```
+$ deauth AA:BB:CC:DD:EE:FF
+ERROR: 'deauth <target>' is not supported — wifi_atk_menu() selects the target
+on the device. Run 'deauth' with no argument.
+```
+
+**Unexpected side benefit:** the rejection returns in **63 ms** and never opens the
+menu, so this form of the verb no longer blocks the serial task and no longer carries
+ISSUE-1's crash risk. `deauth` with no argument is unchanged and still does both.
 
 ---
 
@@ -360,7 +377,7 @@ verb and let the operator work it out, rather than instruct a specific button.
 
 ### ISSUE-7 — `[CLI] Result: TRUE` is hardcoded for every attack verb
 
-**Status:** OPEN · **Severity:** high (app cannot detect failure) · **Verified** 2026-07-29
+**Status:** RESOLVED 2026-07-30 · **Severity:** high (app cannot detect failure) · **Verified** 2026-07-29
 
 All six attack callbacks discard the outcome and return `true` unconditionally
 (`attack_commands.cpp:147-175`):
@@ -396,6 +413,51 @@ outcome telemetry in the firmware.
 
 **Fix:** propagate the real return value where the underlying function has one, and
 emit a `ble_result`-style outcome frame where it does not.
+
+**Fix applied 2026-07-30, ELF `411d7e151dbc2356`.** Both halves of that direction,
+plus a real defect found while doing it.
+
+*A new `attack_result` event frame.* All six callbacks now route through
+`runInteractiveAttack()`, which times the call, restores the device state and emits:
+
+```json
+{"id":10,"type":"attack_result","verb":"deauth",
+ "outcome":"rejected_unsupported_target","elapsed_ms":0,
+ "wifi_mode":0,"free_heap":80547}
+```
+
+**`outcome` is deliberately `completed`, never `success`.** These verbs open an
+interactive menu; finishing one means the operator left it, not that an attack
+worked. Anything stronger would just repeat the old lie in a new field. What the app
+gains is `elapsed_ms`, `wifi_mode` and `free_heap` — enough to recognise the failure
+shape that started this entry, since an attack that "completes" in 30 ms did not run.
+
+*A genuinely knowable outcome, for the one verb that has one.* `ReverseShell()` was
+`void`; it now returns `bool` and `reverseshellCmdCallback` propagates it, printing
+`ERROR: reverseshell could not start its AP` and returning **false**.
+
+**Root cause of the original observation, found and fixed.** The
+`create(): passphrase too short!` in this entry was not bad luck or a missing config
+— `reverseShell.cpp` called `WiFi.softAP("BruceShell", "bruce")`, and **WPA2 rejects
+any passphrase under 8 characters**. The AP could therefore *never* start, on any
+build, for anyone. The passphrase is now `REVERSE_SHELL_AP_PASSWORD`
+(`"bruceshell"`, 10 chars), defined once in the header so the on-screen text cannot
+drift from what is handed to `softAP()`. **The AP-up path is still UNTESTED** — the
+verb blocks until an Esc chord once its AP succeeds, so it needs an attended run.
+
+**Verified on hardware** 2026-07-30 — `[CLI] Result: FALSE` from an attack verb, which
+had never happened before:
+
+```
+$ deauth AA:BB:CC:DD:EE:FF
+  -> ERROR: 'deauth <target>' is not supported ...
+  +1.44s {"id":10,"type":"attack_result","verb":"deauth","outcome":"rejected_unsupported_target",...}
+  +1.45s {"id":11,"type":"log","line":"[CLI] Result: FALSE","level":"info"}
+```
+
+⚠️ **`attack_result` is a new frame type.** `BRUCELINK.md` and the API contract both
+state that only `state`, `log`, `ble_progress` and `ble_result` are emitted. That is
+now out of date, and the maritest `vendor/` copy of the contract is stale.
 
 ---
 
@@ -589,6 +651,42 @@ symptom, attributing it to ARP duplicate-address detection hanging because the E
 does not answer ARP probes. That is a better fix than a static address and it was
 missed on the day. **Try `ipv4.dad-timeout 0` before reaching for a static IP.**
 
+**Tried 2026-07-30. It does not work, and the ARP/DAD attribution is wrong.** A fresh
+`nmcli` profile created with `ipv4.dad-timeout 0` still failed with *"IP configuration
+could not be reserved"*. The NetworkManager journal shows association succeeding
+outright and only DHCP failing:
+
+```
+device (wlp39s0): supplicant interface state: 4way_handshake -> completed
+device (wlp39s0): Activation: (wifi) Stage 2 of 5 (Device Configure) successful.
+                  Connected to wireless network "BruceNet"
+dhcp4 (wlp39s0): activation: beginning transaction (timeout in 45 seconds)
+   ... no lease
+```
+
+Association completes; **the device's DHCP server simply does not answer**. Duplicate-
+address detection is not involved, so disabling it changes nothing.
+
+**A static address is therefore the actual remedy, not a workaround hiding a DHCP
+problem** — the DHCP problem is device-side and unfixed:
+
+```sh
+nmcli con mod <profile> ipv4.method manual ipv4.addresses 172.0.0.5/24 \
+      ipv4.gateway "" ipv4.never-default yes
+```
+
+Verified 2026-07-30: associates immediately, ICMP 3/3 to `172.0.0.1`, `POST /login`
+302 + cookie in 0.35 s. **`TEST_STATUS.md` §Test harness has been corrected.**
+
+**One more correction: elapsed uptime is not the variable — navigation is.** This
+entry's operational rule says to issue `webui -bg` "as soon after boot as possible".
+Counter-example measured 2026-07-30: `webui -bg` fired at **t=717,477 ms (~12 minutes
+uptime)** with no operator navigation still reached `webui post-begin` at **dma
+largest 6,900** — equal to the best of the three runs tabled above and better than
+run 1 (6,644) and the failing run 2 (6,132). A second run at t=36,467 ms also gave
+6,900. **Restate the rule as "do not navigate menus before starting the WebUI";
+elapsed time is not implicated.**
+
 ---
 
 ### ISSUE-13 — `encrypt` then `decrypt` fails ~62% of the time, silently
@@ -711,7 +809,7 @@ settings nosuchfield 1      ->  Invalid field name: nosuchfield
 
 ### ISSUE-15 — the JS interpreter runs scripts but has no return channel
 
-**Status:** OPEN · **Severity:** high (no output, no errors, no result) ·
+**Status:** RESOLVED 2026-07-30 (output); **errors still invisible** · **Severity:** high (no output, no errors, no result) ·
 **Verified** 2026-07-29
 
 `js run_from_buffer` executes correctly — proven by side effect, not by output:
@@ -751,6 +849,39 @@ write a file and `cat` it.
 **Naming trap:** bare `print`/`println` are **badusb HID** natives
 (`native_badusbPrint`, `mqjs_stdlib.h`), not console output. A script calling
 `print("x")` types keystrokes into whatever host the device is plugged into.
+
+**Fix applied 2026-07-30, ELF `411d7e151dbc2356` — script output now reaches the app.**
+Both bindings were redirected: `js_print` (`globals_js.cpp`) no longer writes to C
+`stdout` via `fwrite`/`putchar`, and `internal_print_mq` (`serial_js.cpp`) no longer
+writes to `Serial`. Both now emit an event frame prefixed `[js] `.
+
+**They go to the event stream, not to `serialDevice`, and that is the load-bearing
+design decision here.** Routing them to the CLI characteristic was tried first and is
+wrong: scripts run on the **interpreter task**, so their output appears *after* the
+`js` verb has already written its reply and its `0x04` EOT. Measured on hardware:
+
+```
+CLI characteristic:  52 bytes, "Reading input data from serial buffer until EOF" + EOT
+  +3.00s  {"id":2,"type":"log","line":"[CLI] Result: TRUE","level":"info"}
+  +3.54s  {"id":3,"type":"log","line":"[js] HELLO_FROM_JS","level":"info"}
+  +3.54s  {"id":4,"type":"log","line":"[js] 42","level":"info"}
+```
+
+The output lands **540 ms after the response boundary**. On the CLI characteristic
+those bytes would have been injected into whatever command came next and
+desynchronised its framing — the same hazard that makes `display start` unusable. The
+`6*7` → `42` also confirms non-string values stringify correctly, which the old
+`JS_PrintValueF` stdout-only path did separately.
+
+*What is still wrong:* **errors remain invisible.** A syntax error or a
+`ReferenceError` still produces no frame and is still indistinguishable from success
+at the client — only `print` output was fixed. The three-run table above stands for
+the error cases.
+
+*Consequence for the app:* it must subscribe to the **event** characteristic to read
+script output; the `js` verb's own reply will never contain it. Output is
+asynchronous, so correlate by `id` ordering rather than expecting it before
+`[CLI] Result:`.
 
 ---
 
@@ -826,12 +957,29 @@ routes 200, the 4,726-byte page stalled — and means an app that probes reachab
 with a small request will conclude the transport is healthy when it cannot serve
 anything useful.
 
+**New route added to the pattern, 2026-07-30: `/getscreen` stalls.** With BLE armed,
+the AP up and a healthy `webui post-begin` profile (dma largest **6,900**),
+`GET /getscreen` returned **`http=000`, 0 bytes, at a 30 s timeout**. It is a large
+body by construction — `MAX_LOG_ENTRIES * MAX_LOG_SIZE` of TFT draw log
+(`webInterface.cpp:482-500`) — so it belongs with `GET /` rather than with the small
+routes. Worth naming because `TEST_STATUS.md` lists `/getscreen` under "All HTTP
+routes … 200 and sub-second", which holds **only with `ble api off`**.
+
+**One claim in this entry is contradicted and is corrected here.** It states that
+*"After the large request every route went to `http=000`."* That did **not** hold in
+this run: immediately after the 30 s `/getscreen` stall, `POST /cm` still returned
+**200 in 5–22 ms**, twice. So a large-body stall does not necessarily poison the small
+routes — the earlier observation was a lower-heap case, not a general rule.
+
+The stall was not free, though: heap afterwards read free **12,404**, `minEver`
+**2,156**, dma largest **2,932** — down from 6,900, and inside ISSUE-25's abort band.
+
 ---
 
-### ISSUE-17 — the JS interpreter permanently retains ~18 KB of internal heap
+### ISSUE-17 — the JS interpreter ~~permanently retains~~ transiently holds ~18 KB of internal heap
 
-**Status:** OPEN · **Severity:** high (it is enough to break `webui`, see ISSUE-12) ·
-**Verified** 2026-07-29 · **Measured across a reboot boundary**
+**Status:** RESOLVED 2026-07-30 — **not a leak; the title and premise were wrong** ·
+**Severity:** was high · **Root cause established, no code change needed**
 
 Running any `js run_from_buffer` script leaves internal heap permanently lower until
 the device is rebooted. Measured on the same boot, 2026-07-29:
@@ -855,6 +1003,83 @@ obvious next experiment, and cheap.
 the difference between `webui` starting and failing silently (ISSUE-12). An app that
 runs a JS payload and then tries to move bulk transfer onto HTTP will find the HTTP
 transport gone, with no error from either verb.
+
+---
+
+**RESOLVED 2026-07-30 — it is the interpreter task's stack, and it comes back on its
+own in about two seconds. There is no leak and no retention.**
+
+The open question this entry posed ("true leak, or a one-off cached context?") has a
+third answer neither option covered.
+
+**Root cause.** `startInterpreterTask()` creates the script task with
+`INTERPRETER_TASK_STACK_SIZE`, which is **16384** bytes on a PSRAM board
+(`include/precompiler_flags.h:12-13`). With the FreeRTOS TCB that is ~17.8 KB of
+*internal* DRAM — matching the measured **17,828 bytes** almost exactly. The task ends
+with `vTaskDelete(NULL)` (`interpreter.cpp:114`), and FreeRTOS reclaims a
+self-deleted task's stack **in the idle task**, not at the delete call. So the memory
+is outstanding only until the idle task next runs.
+
+**Measured, fresh boot, one `js run_from_file` then `free` sampled repeatedly:**
+
+| when | free | largest | dma |
+|---|---|---|---|
+| immediately after the verb | **62,683** | 31,732 | 31,732 |
+| +2 s | **80,511** | 31,732 | 31,732 |
+| +4 s / +8 s / +15 s | 80,511 | 31,732 | 31,732 |
+
+Fully recovered within 2 s and flat thereafter. `largest` and `dma largest` never
+moved off 31,732 at any point, so it never fragmented either.
+
+**Three claims in the original entry are wrong and are corrected here:**
+
+1. **"until the device is rebooted"** — no. It returns in ~2 s with no reboot.
+2. **"~516 KB of PSRAM are not returned"** — not reproducible. Across every
+   measurement PSRAM moved by at most **52 bytes** (8,382,704 → 8,382,652 → back).
+3. **The `run_from_buffer` vs `run_from_file` distinction claimed mid-investigation
+   was a measurement artifact and is retracted.** Six proven-executed
+   `run_from_buffer` runs looked flat only because that harness slept 0.8 s and ran a
+   `cat` before sampling, giving the idle task time to reclaim; the `run_from_file`
+   samples were taken immediately. **Both entry points behave identically.** Recorded
+   because it is exactly the trap this register exists to catch — the sampling delay
+   was the variable, not the code path.
+
+Every run above was proven to have executed by a filesystem side effect, because `js`
+has no return channel (ISSUE-15) and a silent no-op is otherwise indistinguishable
+from success. An earlier attempt at this table was meaningless for precisely that
+reason: it under-declared the buffer size, the scripts never ran, and the heap was
+flat because *nothing happened*.
+
+**But the ISSUE-12 consequence is real, and now has a trivial remedy.** Firing
+`webui -bg` *immediately* after a script lands inside the ~2 s window and the WebUI
+fails hard — console-captured on ELF `76d42c72f2b4a8a4`:
+
+```
+[RAMLOG] stage=webui pre-alloc  heap free= 10,392 largest= 7,156 dma= 2,548
+[RAMLOG] stage=webui pre-ws     heap free=  2,000 largest= 1,780 dma=     8
+[E][AsyncTCP.cpp:1521] begin(): failed to start task
+[RAMLOG] stage=webui post-begin heap free=  1,600 largest= 1,396 dma=     4
+```
+
+`webui -bg` still replied `AP`. Externally the AP was on air and ICMP was 3/3, but
+`POST /login` and `POST /cm` both returned **`http=000` in ~1.4 ms with curl exit 7**
+— TCP connect *refused*, the server never listened.
+
+**Waiting ~3 s first removes the problem entirely.** Same firmware, same script, one
+`free` in between: heap back to 80,811, then `webui -bg` reached
+`post-begin` at free 15,079 / **dma largest 6,644** — the known-good profile.
+
+**Corrected operational rule:** *let a script finish and give the device ~2 s before
+starting the WebUI.* The previous rule — treat any `js` run as permanently poisoning
+`webui` until reboot — was far stronger than the evidence, and wrong.
+
+⚠️ **Two distinct HTTP failure modes must not be conflated**, because they look alike
+in a one-line curl result and mean opposite things:
+
+| Mode | Signature | Meaning |
+|---|---|---|
+| Server never started | connect **refused**, `http=000` in ~1 ms, curl exit 7 | AsyncTCP could not allocate its task (this entry, ISSUE-12) |
+| Server started, no RAM for a body | connect **accepted**, stalls to timeout, `http=000` | the response body cannot be allocated (ISSUE-16, ISSUE-21) |
 
 ---
 
@@ -912,6 +1137,39 @@ credentials returns **401 Unauthorized**.
 **Fix direction (not implemented):** keep sessions in RAM, or persist them lazily
 rather than on every login; and check the `FS::open` result instead of letting newlib
 abort.
+
+**Status update: PARTIALLY FIXED 2026-07-30 in ELF `411d7e151dbc2356`** — the flash
+write is gone; the underlying memory ceiling is not.
+
+**The defect was wider than this entry recorded.** `saveFile()` was called from
+**three** places, not one: `addWebUISession()`, `removeWebUISession()` **and
+`isValidWebUISession()`** (`config.cpp`). The last runs on *every authenticated
+request* whose token is not already the most-recent one — so the whole-config flash
+write was reachable from any authenticated route, not just `POST /login`.
+
+**Fix.** Session tokens are now RAM-only. All three `saveFile()` calls are removed,
+`webUISessions` is no longer serialised by `toJson()`, and any tokens still present
+in an older config file are discarded at load rather than restored — they are stale
+bearer tokens from a previous boot. Sessions not surviving a reboot is the more
+correct behaviour anyway, and it was never worth a flash write.
+
+This also closes part of ISSUE-23: live bearer tokens no longer appear in the
+`settings` dump, because they are no longer in the serialised config at all.
+
+**Measured, 8 consecutive logins on a fresh boot:**
+
+| | before (ELF `76d42c72f2b4a8a4`) | after (ELF `411d7e151dbc2356`) |
+|---|---|---|
+| login latency | 350 ms – 2.35 s | **67 – 237 ms** |
+| device survival | **abort + reboot after ~4** | **8 logins, no abort**, uptime continuous |
+| `webui post-begin` dma largest | 6,644 – 6,900 | **7,156** (smaller config) |
+
+*What is still wrong:* logins remain **non-deterministic under memory pressure**.
+In the 8-login run, #1–#4 and #7 returned 302 + cookie sub-second while #5, #6 and #8
+stalled to a 30 s timeout. That is the ISSUE-16 body-allocation ceiling, not this
+entry's flash write, and it is unfixed. BLE kept answering `uptime` throughout
+(00:02:30, continuous), so the device degraded rather than died — which is the
+improvement this fix actually delivers.
 
 ---
 
@@ -1326,7 +1584,8 @@ connected to anything reachable.
 
 ### ISSUE-23 — WiFi credentials are stored in plaintext and readable over an unauthenticated link
 
-**Status:** OPEN · **Severity:** high (secret disclosure) · **Verified** 2026-07-29
+**Status:** MITIGATED 2026-07-30 (disclosure closed; storage still plaintext, link still unauthenticated) ·
+**Severity:** high (secret disclosure) · **Verified** 2026-07-29
 
 `wifi add <ssid> <pwd>` stores the password verbatim and writes it to flash
 (`config.cpp:659-662`):
@@ -1362,11 +1621,42 @@ dump; or require pairing/bonding on the GATT service; or keep credentials out of
 serialised config. Until then, **do not store real network credentials on this
 device**, and treat anything in `bruce.conf` as public to anyone within BLE range.
 
+**Mitigation 1 of 3 applied 2026-07-30, ELF `411d7e151dbc2356` — the dump is
+redacted.** `settings` and single-field reads now replace every secret-bearing value
+with `<redacted>`:
+
+```
+settings wifiAp           ->  wifiAp = {"ssid":"BruceNet","pwd":"<redacted>"}
+settings webUI            ->  webUI = {"user":"admin","pwd":"<redacted>"}
+settings wigleBasicToken  ->  wigleBasicToken = <redacted>
+settings                  ->  "wifi": { "TESTNET_FAKE": "<redacted>" }, ...
+```
+
+Covers `webUI.pwd`, `wifiAp.pwd`, every value in the `wifi` SSID→password map,
+`wigleBasicToken` and `wdgwarsApiKey`. SSIDs and the WebUI username stay visible —
+they are operationally useful and not secrets. Session tokens are gone from the dump
+entirely, because ISSUE-18's fix stopped serialising them at all.
+
+**Redaction is applied only to the copy the CLI is about to print.** `bruceConfig`
+and the file written by `saveFile()` are untouched — redacting inside `toJson()`
+would have persisted the placeholder and destroyed the real credentials on the next
+save. The single-field path is redacted too, or `settings wifi` would walk straight
+around the dump.
+
+*What is still wrong, and why this is MITIGATED rather than RESOLVED:*
+
+- Credentials are **still stored in plaintext** in `bruce.conf` on LittleFS. Anything
+  that can read the file — `cat /bruce.conf`, the WebUI file routes — still gets them.
+  **This is the bigger hole and it is not closed.**
+- The **BLE command bus still has no authentication**. Redaction narrows what a
+  drive-by client learns from one verb; it does not make the link trustworthy.
+- Guidance is unchanged: **do not store real network credentials on this device.**
+
 ---
 
 ### ISSUE-24 — a verb dispatched over HTTP `/cm` never repaints the screen
 
-**Status:** OPEN — fix landed in `d71f19e9`, **hardware verification still UNRUN** ·
+**Status:** RESOLVED — fix `d71f19e9`, **verified on hardware 2026-07-30** (5th attempt) ·
 **Severity:** medium (reads as a crash to anyone watching) · **Verified** 2026-07-29
 
 `handleSerialCommands()` has two dispatch paths, and only one of them hands the
@@ -1450,6 +1740,63 @@ was not understood when the fix was written.
 
 That leaves `POST /cm cmnd=evilportal` as the only discriminating test available, which
 is also the original repro.
+
+---
+
+**VERIFIED 2026-07-30 on ELF `76d42c72f2b4a8a4`. The fix works.**
+
+**The paragraph above is wrong, and being wrong is what cost four attempts.**
+`evilportal` is not "the only discriminating test" — it is **structurally incapable**
+of being one. Exiting the blocking portal *requires* button presses (Esc chord →
+"Exit Portal"), and this entry itself states *"Any button press repaints it."* So the
+observation can never be attributed to the fix rather than to the operator's own
+input. Attempts 1–4 were all chasing an unfalsifiable test.
+
+**Attempt 4 (2026-07-30) failed on exactly that, plus something worse: the portal
+never actually exited.** The operator reported the screen returning to the main menu,
+which looked like success. It was not:
+
+- the portal AP was **still on air** afterwards, and the portal **still served**
+  `GET /hotspot-detect.html` → 200, 99 B, 0.011 s;
+- `EvilPortal::shutdown()` calls `webServer.end()` and `dnsServer->stop()`, so a
+  serving web server **proves** `shutdown()` never ran and `loop()` never returned;
+- BLE `uptime` returned 0 bytes with no EOT, twice at 25 s, while GATT connect and
+  service discovery still succeeded — the serial task was still inside the portal;
+- zero crash/reset markers, so no reboot either.
+
+`redrawUnlessNavigation()` therefore never ran. What the operator saw was the **main
+loop task repainting over a still-running portal** — worth knowing on its own: *this
+device can display the main menu while a portal is live, serving, and holding the
+serial task.* That observation is what upgraded ISSUE-31 to hardware-verified.
+
+**Attempt 5 changed the probe verb to `blespam apple 10` and settled it immediately.**
+A valid ISSUE-24 probe needs three properties, all confirmed before dispatch:
+
+1. **it draws** — `drawMainBorderWithTitle`, `padprintln`, `tft.fillRect`
+   (`ble_spam.cpp:379-382`, `:799-802`);
+2. **it returns on its own** — finite packet count, no on-device interaction;
+3. **it does not set `returnToMenu` itself**.
+
+Run, 09:52–09:55: fresh boot (uptime 00:00:52), `webui -bg` at t=55,132 ms reaching
+`post-begin` at dma largest 6,644; static IP; `POST /login` 302 + cookie in 2.35 s;
+operator confirmed the device was on the **main menu**; `POST /cm cmnd=blespam apple 10`
+→ `queued`, 200 in 28 ms. **The operator was instructed not to touch the device and
+confirmed they did not.** The spam drew, completed, and the BLE API resumed by itself
+— which proves `blespamCmdCallback` returned and so `redrawUnlessNavigation()` ran.
+
+Result: **the screen repainted to the main menu unaided.** Controls: BLE `uptime`
+answered `00:01:56` against the 00:00:52 baseline, i.e. **monotonic, no reboot**, and
+the console capture contained zero `rst:0x` / `Backtrace:` / `assert failed` / `Guru`
+markers. With no button press and no reboot, the only remaining mechanism is
+`redrawUnlessNavigation()` → `backToMenu()` → `returnToMenu` consumed by
+`loopOptions()` under `MENU_TYPE_MAIN`.
+
+**The submenu limitation documented above is unchanged and still applies.** A verb
+dispatched over `/cm` repaints only when the main loop is sitting on the main menu.
+
+**Reusable test-design rule this produced:** *to verify a repaint, never pick a probe
+verb that needs human input to terminate — the input becomes an alternative
+explanation.* Prefer a self-terminating drawing verb such as `blespam <type> <count>`.
 
 ---
 
@@ -1622,6 +1969,27 @@ AP exists**.
 `wifiConnected` assignment when `softAP()` failed, and use `log_e` rather than
 `Serial.printf`.
 
+**Fix applied 2026-07-30, ELF `411d7e151dbc2356`** — exactly that direction, plus the
+restart path the entry flagged as a second site.
+
+- `beginAP()` returns `bool`. On a failed `softAP()` it now returns early **before**
+  `wifiConnected = true`, `setupRoutes()`, `dnsServer->start(53, ...)` and
+  `webServer.begin()`, so a failed start no longer claims port 53 on the DNS
+  singleton that `karma` also borrows.
+- Both diagnostics moved `Serial.printf`/`Serial.println` → `log_e`, so they reach the
+  console instead of nothing (ISSUE-22). `CORE_DEBUG_LEVEL=1` on this board compiles
+  out every level below ERROR, so `log_e` is the only option, not a stylistic choice.
+- `restartWiFi()` now **captures** `softAP()`'s return, which it previously discarded
+  entirely, and bails out the same way rather than rebuilding DNS and HTTP on top of
+  an AP that is not there.
+- The constructor no longer enters `loop()` when the AP failed — that would sit the
+  operator in front of a portal UI for an attack that can never receive a client,
+  while holding the serial task.
+
+⚠️ **NOT VERIFIED ON HARDWARE.** Reaching this code requires `WiFi.softAP()` to
+actually fail, which has not been induced on the bench. The change is code-verified
+and compiles; the failure path itself is untested. Do not record it as proven.
+
 ---
 
 ### ISSUE-29 — `POST /cm cmnd=nav` latches button globals that the main menu never clears
@@ -1668,6 +2036,29 @@ AsyncWebServer task *before* queueing — the reply is `command nav esc success`
 
 **Fix direction:** clear the flags after the hold loop, or give the main-menu path a
 consumer for `EscPress`.
+
+**Fix applied 2026-07-30, ELF `411d7e151dbc2356`** — the first option. `*var`,
+`AnyKeyPress` and `SerialCmdPress` are all set back to `false` immediately after the
+hold loop, so a `nav` pulse is now a bounded press-then-release instead of a latch.
+
+**This is predicted to also improve ISSUE-19, and that prediction is worth testing.**
+ISSUE-19 established that a single `nav` pulse cannot release a blocked verb, and
+attributed it to `ScrollableTextArea` needing two edges:
+
+```cpp
+while (check(SelPress))  { ... }   // wait for RELEASE
+while (!check(SelPress)) { ... }   // then wait for PRESS
+```
+
+With the flag latched high forever, the **release-wait could never complete**. Giving
+the pulse a falling edge supplies exactly what that first loop is waiting for. So the
+latch may well have been the *cause* of "one pulse is not enough", not merely a
+co-symptom.
+
+⚠️ **UNVERIFIED — both halves.** Neither the latch fix itself nor its predicted effect
+on ISSUE-19 has been exercised on hardware; that needs a blocked `ap_info` and a
+single `nav sel` pulse. **Stated as a hypothesis, not a result.** ISSUE-19's guidance
+("pulse until the device answers") stands until someone measures it.
 
 ---
 
@@ -1716,6 +2107,30 @@ automatic dump. The one line that would discriminate the first candidate,
 ISSUE-22 reaches nothing on this board. **Changing that one line to `log_e` is the
 cheapest next experiment** and would likely settle it.
 
+**Diagnostic added 2026-07-30, ELF `411d7e151dbc2356` — the experiment is now armed,
+but the wedge has not recurred, so nothing is settled yet.** `display.cpp` emits two
+`log_e` lines around the menu dispatch instead of the unreachable `Serial.println`:
+
+```
+Selected: <label>          <- before options[chosen].operation()
+Returned from: <label>     <- after it
+```
+
+The pair is deliberate. A `Selected:` with no matching `Returned from:` names the
+menu entry that never came back and discriminates the "blocking
+`options[chosen].operation()`" candidate directly; both lines present move suspicion
+to `ConfigMenu::optionsMenu()`'s `while (true)` or a latched flag. The "Forcely "
+prefix for `forceMenuOption` dispatches is preserved.
+
+`log_e` rather than `log_i` because `CORE_DEBUG_LEVEL=1` on this board
+(`boards/smoochiee-board/smoochiee-board.ini:21`) compiles out every level below
+ERROR — the level is a constraint here, not a claim about severity.
+
+**Next time the main loop wedges, capture `/dev/ttyACM0` and read the last
+`Selected:` line.** One candidate in the list above is also now less likely: ISSUE-29's
+latched `EscPress` was fixed in the same build, so if the wedge persists, that was not
+the cause.
+
 **Trigger sequence, for repro attempts.** Order matters, and note **no `nav` was sent
 before the freeze** — the `nav esc` pulses came afterwards and did unwind the UI back
 to the main menu without unwedging it:
@@ -1737,10 +2152,10 @@ from a firmware fault during this session.
 
 ---
 
-### ISSUE-31 — Evil Portal's destructor is empty, so `karma` leaks the shared DNS server
+### ISSUE-31 — Evil Portal's destructor is empty, so the portal leaks its whole AP + DNS + HTTP stack
 
-**Status:** OPEN · **Severity:** low · **Verified** by code 2026-07-30 · **Recorded
-deliberately without a fix**
+**Status:** FIXED in code 2026-07-30, fix UNVERIFIED · **Severity:** raised low → **high** ·
+**Defect HARDWARE-VERIFIED 2026-07-30** (was code-only)
 
 `EvilPortal::~EvilPortal()` is empty (`evil_portal.cpp:38`). `karma`'s
 `destroyActivePortal()` (`karma_attack.cpp:684`, called from six sites) deletes the
@@ -1754,8 +2169,45 @@ naming explicitly because it looks like it would explain the portal exiting unpr
 that this register has recorded as unexplained — **it does not**, because it never
 runs. That observation stays open.
 
-**Left unfixed on purpose:** both sit in upstream code outside the headless-portal
-change, and this fork prefers additive changes in new files to keep merges clean.
+~~**Left unfixed on purpose:** both sit in upstream code outside the headless-portal
+change, and this fork prefers additive changes in new files to keep merges clean.~~
+
+---
+
+**Severity raised and the defect confirmed on hardware 2026-07-30 — it is much worse
+than "karma leaks the DNS server".**
+
+Caught while attempting the ISSUE-24 verification. A **blocking `evilportal`** was
+left without completing "Exit Portal", and afterwards:
+
+| Probe | Result |
+|---|---|
+| AP `Free Wifi` on air | **yes**, ch 6, seen by an independent `nmcli` scan |
+| `GET /hotspot-detect.html` | **200, 99 bytes, 0.011 s** |
+| `GET /generate_204` | **302** |
+
+So the AP, the port-53 DNS server and the web server all keep running and **keep
+serving**, indefinitely, after the operator believes the attack is over. This is not
+a tidy-up nit: **a captive portal that outlives its own UI is still capturing.** The
+screen had meanwhile been repainted to the main menu by the main loop task, so
+nothing on the device indicated a portal was live.
+
+It is also the mechanism behind the BLE symptom in that session — the leaked stack
+holds heap, so replies could not be allocated (ISSUE-16).
+
+**Fix applied, ELF `411d7e151dbc2356`.** `~EvilPortal()` now calls `shutdown()`, and
+`shutdown()` was made **idempotent** (`_shutdownDone`) so the paths that already call
+it explicitly — `evilPortalBgStop()`, and the "Exit Portal" path — are unaffected. A
+`_beganAp` flag prevents a constructor that bailed out of `setup()` from tearing down
+radio state it never touched.
+
+⚠️ **The fix is UNVERIFIED on hardware.** Confirming it needs an attended run: start
+the blocking `evilportal`, leave it *without* completing "Exit Portal", and re-probe
+the AP and `GET /hotspot-detect.html`. Both must fail for the fix to be proven. The
+`karma` path (`destroyActivePortal()`) is likewise unverified.
+
+**`shouldTerminate()` is still dead code** and the unexplained self-exiting portal
+remains unexplained; nothing above touches either.
 
 ---
 

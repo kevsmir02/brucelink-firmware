@@ -1,6 +1,35 @@
 #include "settings_commands.h"
 #include <globals.h>
 
+static const char *REDACTED = "<redacted>";
+
+// The BLE command bus has no authentication of any kind, so anything this verb
+// prints is readable by any client in radio range (ISSUE-23). Making `settings`
+// work at all (ISSUE-2) is what turned these from unreachable-by-accident into
+// disclosed-by-design, so the dump redacts them explicitly.
+//
+// Applied ONLY to the local copy the CLI is about to print. bruceConfig and the file
+// written by saveFile() are untouched — redacting in toJson() itself would persist
+// the placeholder and destroy the real credentials on the next save.
+static void redactSecrets(JsonObject setting) {
+    if (setting["webUI"].is<JsonObject>()) setting["webUI"]["pwd"] = REDACTED;
+    if (setting["wifiAp"].is<JsonObject>()) setting["wifiAp"]["pwd"] = REDACTED;
+    // Stored SSID -> plaintext password map. The SSIDs are the keys, so they stay
+    // visible; only the passwords are replaced.
+    if (setting["wifi"].is<JsonObject>()) {
+        for (JsonPair kv : setting["wifi"].as<JsonObject>()) kv.value().set(REDACTED);
+    }
+    if (!setting["wigleBasicToken"].isNull()) setting["wigleBasicToken"] = REDACTED;
+    if (!setting["wdgwarsApiKey"].isNull()) setting["wdgwarsApiKey"] = REDACTED;
+}
+
+// True for a field whose value must not be echoed by a single-field read either —
+// otherwise `settings wifi` walks straight around the dump redaction above.
+static bool isSecretField(const String &name) {
+    return name == "wifi" || name == "wifiAp" || name == "webUI" || name == "wigleBasicToken" ||
+           name == "wdgwarsApiKey";
+}
+
 uint32_t settingsCallback(cmd *c) {
     Command cmd(c);
 
@@ -20,6 +49,7 @@ uint32_t settingsCallback(cmd *c) {
         // the GATT service (ble_api.cpp:63), so writing to Serial sent the whole
         // config to a USB port the companion app cannot read, and the app saw an
         // empty reply.
+        redactSecrets(setting);
         String cfg;
         serializeJsonPretty(jsonDoc, cfg);
         serialDevice->println(cfg);
@@ -58,6 +88,8 @@ uint32_t settingsCallback(cmd *c) {
     }
 
     if (setting_value.length() == 0) {
+        // Redact before echoing, or `settings wifi` walks straight around the dump.
+        if (isSecretField(setting_name)) redactSecrets(setting);
         serialDevice->print(setting_name + " = ");
         serialDevice->println(setting[setting_name].as<String>());
         return true;

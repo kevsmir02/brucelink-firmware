@@ -3,43 +3,56 @@
 
 #include "core/display.h"
 
+#include "core/wifi/ws_events.h"
 #include "helpers_js.h"
+#include <globals.h>
 
+// Emitted as an event frame rather than to Serial. Serial is the USB CDC object,
+// which reaches nothing at all on this board, so `serial.print()` from a script
+// produced no output on any channel (ISSUE-15).
+//
+// The event stream, not serialDevice: scripts run on the interpreter task, so their
+// output appears long after `js run_from_buffer` has already written its reply and
+// its 0x04 EOT. Writing to the CLI characteristic there would inject bytes into
+// whatever command came next and desynchronise the framing — the same hazard that
+// makes `display start` unusable. Events are a separate characteristic for exactly
+// this reason.
 static void internal_print_mq(JSContext *ctx, int argc, JSValue *argv, uint8_t printTft, uint8_t newLine) {
+    String out;
     for (int argIndex = 0; argIndex < argc && argIndex < 20; ++argIndex) {
-        if (argIndex > 0) {
-            if (printTft) tft.print(" ");
-            Serial.print(" ");
-        }
+        if (argIndex > 0) out += ' ';
 
         JSValue v = argv[argIndex];
         if (JS_IsUndefined(v)) {
-            if (printTft) tft.print("undefined");
-            Serial.print("undefined");
+            out += "undefined";
         } else if (JS_IsNull(v)) {
-            if (printTft) tft.print("null");
-            Serial.print("null");
+            out += "null";
         } else if (JS_IsNumber(ctx, v)) {
             double num;
             JS_ToNumber(ctx, &num, v);
-            if (printTft) tft.printf("%g", num);
-            Serial.printf("%g", num);
+            char numBuf[32];
+            snprintf(numBuf, sizeof(numBuf), "%g", num);
+            out += numBuf;
         } else if (JS_IsBool(v)) {
-            const char *bv = JS_IsBool(v) && JS_ToBool(ctx, v) ? "true" : "false";
-            if (printTft) tft.print(bv);
-            Serial.print(bv);
+            out += (JS_ToBool(ctx, v) ? "true" : "false");
         } else {
             JSCStringBuf sb;
             const char *s = JS_ToCString(ctx, v, &sb);
-            if (s) {
-                if (printTft) tft.print(s);
-                Serial.print(s);
-            }
+            if (s) out += s;
         }
     }
+
+    if (printTft) {
+        if (newLine) tft.println(out);
+        else tft.print(out);
+    }
+    // Partial writes are accumulated so a print()/println() pair still arrives as one
+    // readable line, rather than one frame per fragment.
+    static String pending;
+    pending += out;
     if (newLine) {
-        if (printTft) tft.println();
-        Serial.println();
+        pushWsLog("[js] " + pending, "info");
+        pending = "";
     }
 }
 

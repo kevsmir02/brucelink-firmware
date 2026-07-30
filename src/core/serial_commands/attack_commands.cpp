@@ -187,35 +187,77 @@ uint32_t blespamCmdCallback(cmd *c) {
     return true;
 }
 
-uint32_t karmaCmdCallback(cmd *c) {
-    karma_setup();
+// Every entry point below is `void` upstream, so there is genuinely no return value
+// to propagate — the old bare `return true` was the only thing available, not
+// laziness. What *is* knowable is that the callback ran to completion, how long it
+// took, and what state the radio and heap were left in. Emitting that as a frame
+// gives the app the outcome telemetry ISSUE-7 asks for, and lets it recognise the
+// failure shape that started this: `reverseshell` reported success 30 ms after its
+// AP creation had failed outright, and an instant return is exactly what that looks
+// like from outside.
+//
+// `outcome` is deliberately "completed", never "success". These verbs open an
+// interactive menu; finishing one says the operator left it, not that an attack
+// worked. Anything stronger would repeat the lie in a new field.
+static void pushAttackResult(const char *verb, const char *outcome, uint32_t elapsedMs) {
+    pushWsEvent(
+        "attack_result",
+        String(",\"verb\":\"") + verb + "\",\"outcome\":\"" + outcome +
+            "\",\"elapsed_ms\":" + String(elapsedMs) + ",\"wifi_mode\":" +
+            String((int)WiFi.getMode()) + ",\"free_heap\":" + String(ESP.getFreeHeap())
+    );
+}
+
+static uint32_t runInteractiveAttack(const char *verb, void (*entry)()) {
+    const uint32_t t0 = millis();
+    setDeviceState(verb);
+    entry();
+    setDeviceState("idle");
+    pushAttackResult(verb, "completed", millis() - t0);
     return true;
 }
+
+uint32_t karmaCmdCallback(cmd *c) { return runInteractiveAttack("karma", karma_setup); }
 
 uint32_t deauthCmdCallback(cmd *c) {
-    wifi_atk_menu();
-    return true;
+    Command cmd(c);
+    String target = cmd.getArgument("target").getValue();
+    target.trim();
+    // The argument was accepted and then dropped on the floor (ISSUE-5): the verb
+    // calls wifi_atk_menu(), which takes no target and makes the operator pick one on
+    // the device. Refuse it rather than letting a caller believe it aimed the attack.
+    if (!target.isEmpty()) {
+        serialDevice->println(
+            "ERROR: 'deauth <target>' is not supported — wifi_atk_menu() selects the "
+            "target on the device. Run 'deauth' with no argument."
+        );
+        pushAttackResult("deauth", "rejected_unsupported_target", 0);
+        return false;
+    }
+    return runInteractiveAttack("deauth", wifi_atk_menu);
 }
 
-uint32_t blesnifferCmdCallback(cmd *c) {
-    BleSuiteMenu();
-    return true;
-}
+uint32_t blesnifferCmdCallback(cmd *c) { return runInteractiveAttack("blesniffer", BleSuiteMenu); }
 
-uint32_t apInfoCmdCallback(cmd *c) {
-    displayAPInfo();
-    return true;
-}
+uint32_t apInfoCmdCallback(cmd *c) { return runInteractiveAttack("ap_info", displayAPInfo); }
 
 uint32_t reverseshellCmdCallback(cmd *c) {
-    ReverseShell();
+    // The one verb here with a knowable outcome, now that ReverseShell() reports
+    // whether its AP came up.
+    const uint32_t t0 = millis();
+    setDeviceState("reverseshell");
+    const bool ok = ReverseShell();
+    setDeviceState("idle");
+    if (!ok) {
+        serialDevice->println("ERROR: reverseshell could not start its AP");
+        pushAttackResult("reverseshell", "ap_failed", millis() - t0);
+        return false;
+    }
+    pushAttackResult("reverseshell", "completed", millis() - t0);
     return true;
 }
 
-uint32_t pwngridCmdCallback(cmd *c) {
-    brucegotchi_start();
-    return true;
-}
+uint32_t pwngridCmdCallback(cmd *c) { return runInteractiveAttack("pwngrid", brucegotchi_start); }
 
 void createAttackCommands(SimpleCLI *cli) {
     Command ble = cli->addCompositeCmd("ble");

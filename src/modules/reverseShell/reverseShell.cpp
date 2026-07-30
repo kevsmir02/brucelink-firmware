@@ -1,4 +1,6 @@
 #if !defined(LITE_VERSION)
+// Include our own header so the declaration and the definition cannot drift apart.
+#include "reverseShell.h"
 #include "core/display.h"
 #include <DNSServer.h>
 #include <WiFi.h>
@@ -6,7 +8,7 @@
 #include <ESPAsyncWebServer.h>
 #include <AsyncTCP.h>
 
-void ReverseShell() {
+bool ReverseShell() {
     AsyncWebServer webServer(80);
     AsyncWebSocket ws("/ws");
     DNSServer dnsServer;
@@ -79,16 +81,22 @@ void ReverseShell() {
     WiFi.mode(WIFI_AP);
     if (!WiFi.softAPConfig(apGateway, apGateway, IPAddress(255, 255, 255, 0))) {
         tft.println("Failed to configure AP");
-        return;
+        log_e("reverseshell: softAPConfig failed");
+        return false;
     }
 
-    // ── AP Password: bruce ─────────────────────────────────────
-    if (!WiFi.softAP("BruceShell", "bruce")) {
+    // ── AP Password ────────────────────────────────────────────
+    // Was "bruce". WPA2 requires a passphrase of at least 8 characters, so softAP()
+    // rejected it with "passphrase too short!" on every run and this attack could
+    // never start on any build — the failure that ISSUE-7 caught being reported as
+    // `[CLI] Result: TRUE` 30 ms later.
+    if (!WiFi.softAP("BruceShell", REVERSE_SHELL_AP_PASSWORD)) {
         tft.println("Failed to start AP");
-        return;
+        log_e("reverseshell: softAP failed");
+        return false;
     }
 
-    tft.println("Wi-Fi AP Started: BruceShell (pass: bruce)");
+    tft.println("Wi-Fi AP Started: BruceShell (pass: " REVERSE_SHELL_AP_PASSWORD ")");
     tft.println("IP: " + apGateway.toString());
 
     tcpServer.begin();
@@ -199,5 +207,6 @@ void ReverseShell() {
         }
         delay(10);
     }
+    return true;
 }
 #endif

@@ -26,7 +26,9 @@ public:
     ~EvilPortal();
 
     bool setup(void);
-    void beginAP(void);
+    // Returns false when softAP() failed, in which case no DNS server, no web server
+    // and no wifiConnected flag are left behind (ISSUE-28).
+    bool beginAP(void);
     void setupRoutes(void);
     void loop(void);
     void processRequests(void);
@@ -89,6 +91,11 @@ private:
     bool _pendingWifiRestart = false;
     bool _ready = false;
     bool _apOnAir = false;
+    // beginAP() was entered, so radio state exists to unwind; distinct from _apOnAir,
+    // which says whether the AP actually came up.
+    bool _beganAp = false;
+    bool _servicesUp = false;
+    bool _shutdownDone = false;
 
     CaptiveRequestHandler *_captiveHandler = nullptr;
 

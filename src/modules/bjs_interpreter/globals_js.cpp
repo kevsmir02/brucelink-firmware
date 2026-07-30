@@ -2,7 +2,9 @@
 #include "globals_js.h"
 #include "user_classes_js.h"
 
+#include "core/wifi/ws_events.h"
 #include "mbedtls/base64.h"
+#include <globals.h>
 
 JSValue js_gc(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
     JS_GC(ctx);
@@ -264,23 +266,25 @@ void run_timers(JSContext *ctx) {
 }
 
 JSValue js_print(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
-    int i;
-    JSValue v;
-
-    for (i = 0; i < argc; i++) {
-        if (i != 0) putchar(' ');
-        v = argv[i];
-        if (JS_IsString(ctx, v)) {
-            JSCStringBuf buf;
-            const char *str;
-            size_t len;
-            str = JS_ToCStringLen(ctx, &len, v, &buf);
-            fwrite(str, 1, (size_t)len, stdout);
-        } else {
-            JS_PrintValueF(ctx, argv[i], JS_DUMP_LONG);
-        }
+    // Was fwrite()/putchar() to C stdout, and JS_PrintValueF() for non-strings, both
+    // of which land on a stream nothing on this board reads — not the ESP-IDF console
+    // and, crucially, not the client that issued the command. A script therefore had
+    // no way to return anything at all (ISSUE-15).
+    //
+    // Goes to the event stream rather than serialDevice because the script runs on
+    // the interpreter task, well after `js` wrote its reply and EOT; emitting on the
+    // CLI characteristic would corrupt the framing of the following command.
+    String out;
+    for (int i = 0; i < argc; i++) {
+        if (i != 0) out += ' ';
+        JSCStringBuf buf;
+        size_t len = 0;
+        // JS_ToCStringLen stringifies any value, so non-strings no longer need the
+        // separate stdout-only dump path they used to take.
+        const char *str = JS_ToCStringLen(ctx, &len, argv[i], &buf);
+        if (str) out.concat(str, len);
     }
-    putchar('\n');
+    pushWsLog("[js] " + out, "info");
     return JS_UNDEFINED;
 }
 

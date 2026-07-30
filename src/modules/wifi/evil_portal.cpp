@@ -27,15 +27,29 @@ EvilPortal::EvilPortal(
 
     if (!setup()) return;
     cleanlyStopWebUiForWiFiFeature();
-    beginAP();
+    bool apUp = beginAP();
     // setup() failing returns early above with no outward signal, so a background
     // caller holding this pointer cannot otherwise tell a live portal from a dead
-    // object that never reached beginAP().
+    // object that never reached beginAP(). Kept true even when the AP failed, so the
+    // background caller's two diagnostics stay distinguishable: isReady() reports
+    // "setup failed", apOnAir() reports "softAP failed".
     _ready = true;
+    // Entering loop() with no AP would sit the operator in front of a portal UI for an
+    // attack that cannot receive a single client, and hold the serial task doing it.
+    if (!apUp) return;
     if (!_backgroundMode) { loop(); }
 }
 
-EvilPortal::~EvilPortal() {}
+EvilPortal::~EvilPortal() {
+    // Upstream left this empty. Every path that deletes a portal without calling
+    // shutdown() first therefore leaked the AP, the port-53 DNS singleton and the web
+    // server — karma's destroyActivePortal() (ISSUE-31), and the blocking verb any
+    // time loop() is left without completing "Exit Portal". Confirmed on hardware
+    // 2026-07-30: after such an exit the AP was still on air and the portal still
+    // answered GET /hotspot-detect.html with 200 in 11 ms. shutdown() is idempotent,
+    // so the paths that already call it explicitly are unaffected.
+    shutdown();
+}
 
 void EvilPortal::CaptiveRequestHandler::handleRequest(AsyncWebServerRequest *request) {
     AsyncResponseStream *response = request->beginResponseStream("text/html");
@@ -126,7 +140,8 @@ bool EvilPortal::setup() {
     return true;
 }
 
-void EvilPortal::beginAP() {
+bool EvilPortal::beginAP() {
+    _beganAp = true;
     if (!_backgroundMode) {
         drawMainBorderWithTitle("EVIL PORTAL");
         displayTextLine("Starting...");
@@ -134,12 +149,20 @@ void EvilPortal::beginAP() {
     if (_verifyPwd) WiFi.mode(WIFI_MODE_APSTA);
     else WiFi.mode(WIFI_MODE_AP);
 
+    // log_e, not Serial: Serial reaches nothing on this board (ISSUE-22), which is why
+    // these two failures were silent on every channel including the console.
     if (!WiFi.softAPConfig(apGateway, apGateway, IPAddress(255, 255, 255, 0))) {
-        Serial.println("[PORTAL] softAPConfig failed");
+        log_e("[PORTAL] softAPConfig failed");
     }
     _apOnAir = WiFi.softAP(apName, emptyString, _channel);
     if (!_apOnAir) {
-        Serial.printf("[PORTAL] softAP failed for SSID '%s' on ch%d\n", apName.c_str(), _channel);
+        log_e("[PORTAL] softAP failed for SSID '%s' on ch%d", apName.c_str(), _channel);
+        // Claiming port 53 and starting a web server behind an AP that never came up
+        // leaves the shared DNS singleton bound with nothing serving it, and karma
+        // borrows that same singleton, so the damage crosses features (ISSUE-28).
+        // wifiConnected stays false for the same reason: the rest of the firmware
+        // must not be told an AP exists.
+        return false;
     }
     wifiConnected = true;
 
@@ -149,6 +172,8 @@ void EvilPortal::beginAP() {
     setupRoutes();
     dnsServer->start(53, "*", WiFi.softAPIP());
     webServer.begin();
+    _servicesUp = true;
+    return true;
 }
 
 void EvilPortal::setupRoutes() {
@@ -280,12 +305,21 @@ void EvilPortal::restartWiFi(bool reset) {
     _captiveHandler = nullptr;
 
     wifiDisconnect();
-    WiFi.softAP(apName, emptyString, _channel);
+    // The restart path did not even capture softAP()'s return, so a portal that lost
+    // its AP mid-run rebuilt DNS and HTTP on top of nothing and reported no error on
+    // any channel — the same defect as beginAP()'s (ISSUE-28), one function along.
+    _apOnAir = WiFi.softAP(apName, emptyString, _channel);
+    if (!_apOnAir) {
+        log_e("[PORTAL] softAP failed on restart for SSID '%s' on ch%d", apName.c_str(), _channel);
+        _servicesUp = false;
+        return;
+    }
     vTaskDelay(100 / portTICK_PERIOD_MS);
 
     setupRoutes();
     dnsServer->start(53, "*", WiFi.softAPIP());
     webServer.begin();
+    _servicesUp = true;
 
     if (reset) resetCapturedCredentials();
 }
@@ -369,6 +403,15 @@ void EvilPortal::loop() {
 // background path runs this from the serial task and sustained drawing from
 // there is the ISSUE-1 crash trigger.
 void EvilPortal::shutdown(void) {
+    // Idempotent because the destructor now calls it as a backstop, while the
+    // background path and the "Exit Portal" path still call it explicitly.
+    if (_shutdownDone) return;
+    _shutdownDone = true;
+    // A constructor that bailed out of setup() never reached beginAP(), so it changed
+    // no radio state and has nothing to tear down. Running the sequence below anyway
+    // would knock down WiFi the portal never touched.
+    if (!_beganAp) return;
+
     webServer.end();
     vTaskDelay(200 / portTICK_PERIOD_MS);
 

@@ -738,14 +738,20 @@ int loopOptions(
 
         if (forceMenuOption >= 0 || (millis() - menuOpenTs > MENU_SELECT_IGNORE_MS && check(SelPress))) {
             uint16_t chosen = index;
+            bool forced = false;
             if (forceMenuOption >= 0) {
                 chosen = forceMenuOption;
                 forceMenuOption = -1; // reset SerialCommand navigation option
-                Serial.print("Forcely ");
+                forced = true;
             }
             if (chosen >= options.size() || !options[chosen].enabled) continue;
-            Serial.println("Selected: " + String(options[chosen].label));
+            // Printed via log_e because Serial reaches nothing on this board (ISSUE-22)
+            // and CORE_DEBUG_LEVEL=1 compiles out every level below ERROR. This is the
+            // one line that identifies which entry the main loop entered, so when the
+            // loop wedges (ISSUE-30) it is the only evidence of where it went.
+            log_e("%sSelected: %s", forced ? "Forcely " : "", options[chosen].label.c_str());
             options[chosen].operation();
+            log_e("Returned from: %s", options[chosen].label.c_str());
             break;
         }
         // interpreter_start -> running the interpreter

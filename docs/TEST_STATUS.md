@@ -13,7 +13,8 @@ measurement (device + date) or a code fact (`file:line`). Nothing here is inferr
 **Hardware under test:** bare ESP32‑S3‑N16R8 devkit, 1.47" 172×320 IPS LCD on SPI,
 five buttons, USB powered. No PMU, SD, CC1101, NRF24, PN532, IR or GPS. Env
 `smoochiee-board`. Firmware `2d9422ea`, ELF `5186685c0fdf19c2`; the headless-portal
-rows below are from firmware `fbfe6226`, ELF `76d42c72f2b4a8a4`.
+rows are from firmware `fbfe6226`, ELF `76d42c72f2b4a8a4`; the 2026-07-30 fix rows
+(ISSUE-5, 7, 15, 18, 23, 28, 29, 30, 31) are from ELF **`411d7e151dbc2356`**.
 
 ---
 
@@ -70,6 +71,8 @@ Verified end-to-end on hardware, safe to expose as a one-tap action.
 | `badusb` (USB HID) | Types nothing. No longer hangs — returns in 9.3 s (`b1c825c8`) | ISSUE-20 |
 | `badusb` (BLE HID) | **Not reachable** — no CLI path exists at all | ISSUE-20 |
 | Serial CLI over USB | **Does not exist on this board.** BLE is the only command interface | ISSUE-22 |
+| `evilportal` (blocking) — **leaks its AP** | Exiting without completing "Exit Portal" leaves the AP, DNS and web server **running and serving** (200 in 11 ms). Hardware-confirmed 2026-07-30. Destructor fix landed in `411d7e151dbc2356` but is **unverified** | ISSUE-31 |
+| `reverseshell` | AP could **never** start on any build — `softAP("BruceShell","bruce")`, and WPA2 rejects a passphrase under 8 chars. Passphrase fixed 2026-07-30; **the AP-up path is untested** | ISSUE-7 |
 | HTTP **bodies** with BLE armed | Small replies work; a real page body does not. TCP 80 accepts, `GET /` returns 0 bytes. **Corrected 2026-07-30** — this row previously read "both transports cannot coexist", which is wrong: BLE + AP + WebUI ran together and served `POST /login` and `POST /cm` fine | ISSUE-16, ISSUE-21 |
 | `js` output/errors | Interpreter runs, but no return channel at all | ISSUE-15 |
 | `rf rx`, `md5`/`stat` on a missing file | Silent failure, empty reply | ISSUE-13 §context |
@@ -81,17 +84,21 @@ Verified end-to-end on hardware, safe to expose as a one-tap action.
 |---|---|
 | No remote rescue for radio verbs | WiFi verbs kill the WebUI on entry; BLE verbs destroy WiFi. `deauth`, `karma`, `evilportal`, `sniffer`, `blesniffer` cannot be stopped remotely over **either** transport (ISSUE-19). |
 | `nav` rescue needs repeated pulses | One pulse fails. Pulse until the device answers. Minimum not bisected. |
-| WebUI margin is ~18 KB | Starts from a clean boot; fails silently if anything consumed heap first (ISSUE-12). A JS run alone is enough to break it (ISSUE-17). |
+| WebUI margin is ~18 KB | Starts from a clean boot; fails silently if anything consumed heap first (ISSUE-12). A JS run within the last ~2 s is enough to break it (ISSUE-17). |
 | Discover by service UUID, never by name | `4371ec0b-3d43-49f9-b731-7c72a4a7bb91`. |
 | Transports alternate, never coexist | Start the WebUI **before** dropping BLE, or the device is stranded (ISSUE-22). |
 | `POST /login` is form-encoded | Fields are `username`/`password`, **not** JSON `{user,pwd}`. Wrong form fails silently with a 200 and no cookie. |
-| Never store real WiFi credentials | Plaintext in the config, readable over an unauthenticated BLE link (ISSUE-23). |
+| Never store real WiFi credentials | **Still plaintext in `bruce.conf`**, link still unauthenticated. The `settings` dump is now redacted (ISSUE-23), which closes casual disclosure but not file reads. |
 | BLE replies can truncate silently | No `[TRUNCATED]` marker. Treat a missing EOT as "retry" (ISSUE-16). Hash files, don't eyeball listings. |
 | No battery UI | `battery_pct` still permanently 1 (ISSUE-3 partial — the I²C storm is fixed, the reporting is not). |
 | Never gate on `capabilities` | Compile-time flags (ISSUE-4). |
-| `POST /login` writes flash every time | And can abort the device under load (ISSUE-18). |
-| HTTP `/cm` leaves the screen stale | Fix landed (`d71f19e9`) but **unverified on hardware**, and it only repaints when the main loop is on the **main menu** — a submenu drops the request until a button press (ISSUE-24). |
-| Start `webui` immediately after boot | The margin is decided by **under 1 KB**, and navigating menus first is enough to flip it. Three fresh boots, same command, two outcomes (ISSUE-12). |
+| `POST /login` no longer writes flash | Fixed 2026-07-30: sessions are RAM-only, logins are **67–237 ms** (was 350 ms–2.35 s), and 8 consecutive logins caused **no abort** where ~4 used to. Still **non-deterministic** under memory pressure — 3 of those 8 stalled (ISSUE-18, ISSUE-16). |
+| HTTP `/cm` repaints the screen | **Verified on hardware 2026-07-30** (`d71f19e9`). Only when the main loop is on the **main menu** — a submenu still drops the request until a button press (ISSUE-24). |
+| Don't navigate menus before `webui` | The margin is decided by **under 1 KB**. **Elapsed uptime is not the variable** — `webui -bg` at 12 min uptime with no navigation gave the best profile recorded (dma 6,900). Navigating first is what flips it (ISSUE-12). |
+| Give a `js` script ~2 s before `webui` | The interpreter task's 16 KB stack is reclaimed by the FreeRTOS **idle task**, not at `vTaskDelete`. Start the WebUI inside that window and AsyncTCP cannot allocate; wait, and it is fine (ISSUE-17). |
+| Two different HTTP failure modes | Connect **refused** + instant `http=000` = the server never started. Connect **accepted** + stall to timeout = the body cannot be allocated. Identical in curl, opposite meanings (ISSUE-17 vs ISSUE-16). |
+| `js` output arrives on the **event** stream | `[js] …` `log` frames, asynchronously, *after* the verb's EOT — never in the verb's own reply (ISSUE-15). Script **errors** are still invisible. |
+| Attack verbs emit `attack_result` | New frame type with `verb`/`outcome`/`elapsed_ms`/`wifi_mode`/`free_heap`. `outcome` is `completed`, **never** `success` — these are interactive menus (ISSUE-7). |
 | A "working" RAMLOG profile does not mean HTTP will serve | Two runs matched within 580 bytes and only one could complete a login. `dma largest` at `webui post-begin` predicts better than free heap — 6,644/6,900 served, 6,132 did not (SUSPECTED, ISSUE-12). |
 | A failed GATT **write** means retry; an empty **reply** means do not | ISSUE-26 vs ISSUE-16 — opposite handling, distinguishable at the client by whether the write raised. |
 | `BLE_INIT: Malloc failed` on the console | The device is one allocation from an `abort()` reboot (ISSUE-25). |
@@ -115,10 +122,23 @@ The honest gap. See §"Not tested, and why" in KNOWN_ISSUES.md for the full tabl
 - ~~**Evil Portal with `ble api off`**~~ — **DONE 2026-07-29.** It was the memory
   ceiling: the whole flow works in the BLE-off configuration, credential capture
   included (ISSUE-21). Not re-run since the headless verb landed.
-- **ISSUE-24's fix (`d71f19e9`) on hardware** — **still unverified after three
-  attempts** on 2026-07-30. The only discriminating test is
-  `POST /cm cmnd=evilportal` with the device on the **main menu**; a submenu cannot
-  work, because `loopOptions()` only consumes `returnToMenu` under `MENU_TYPE_MAIN`.
+- ~~**ISSUE-24's fix (`d71f19e9`) on hardware**~~ — **DONE 2026-07-30, 5th attempt.**
+  Verified with `POST /cm cmnd=blespam apple 10`, not `evilportal`: the portal verb is
+  structurally unable to test this, because exiting it requires the very button
+  presses that repaint the screen anyway. See ISSUE-24.
+- **ISSUE-31's destructor fix** — the *defect* is now hardware-confirmed (a portal
+  still serving 200 after exit), but the fix is not. Needs an attended run: start the
+  blocking `evilportal`, leave without completing "Exit Portal", then re-probe the AP
+  and `GET /hotspot-detect.html`.
+- **ISSUE-28's failed-`softAP()` path** — code-verified only; `WiFi.softAP()` has not
+  been made to fail on the bench.
+- **ISSUE-29's fix, and its predicted effect on ISSUE-19** — clearing the latched
+  button globals should also supply the release edge that `ScrollableTextArea` waits
+  for, which may be why one `nav` pulse never sufficed. Both halves unverified; needs
+  a blocked `ap_info` and a single pulse.
+- **`reverseshell` with a working AP** — the passphrase bug is fixed (WPA2 needs ≥8
+  chars; it was `"bruce"`), so the AP should now start, but the verb then blocks until
+  an Esc chord. Needs an attended run.
 - **Credential capture with the headless portal** — approved, never run. Needs
   `ble api off` plus a short duration cap.
 - **ISSUE-30's root cause** — the main-loop wedge. No backtrace obtainable; next step
@@ -161,16 +181,37 @@ Decode a backtrace with:
 Check the panic's `ELF file SHA256` against the local ELF first, or the decode is
 fiction.
 
-**NetworkManager gotcha:** joining the device's AP fails with *"Wi-Fi network could not
-be found"* when the real cause is ARP duplicate-address detection hanging — the ESP32
-does not answer ARP probes. Fix with
-`nmcli connection modify <profile> ipv4.dad-timeout 0`. The supplicant log will show
-the 4-way handshake completing and a DHCP lease issued while nmcli reports failure.
+**NetworkManager gotcha — joining the device's AP.** It fails with *"Wi-Fi network
+could not be found"* or *"IP configuration could not be reserved"*. **Use a static
+address; this is the fix, not a workaround:**
 
-The same failure also shows up as **"IP configuration could not be reserved"**
-(observed 2026-07-30), which is the more honest message: association succeeded and only
-addressing failed. A **static address** works around it —
-`ipv4.method manual`, `172.0.0.5/24`, no gateway, `ipv4.never-default yes` — and that is
-what unblocked the session. But **try `ipv4.dad-timeout 0` first**; it is the documented
-fix, it was missed on the day, and a static address hides a DHCP problem rather than
-solving it.
+```sh
+nmcli con add type wifi ifname '*' con-name BruceNet ssid BruceNet -- \
+  wifi-sec.key-mgmt wpa-psk wifi-sec.psk brucenet \
+  ipv4.method manual ipv4.addresses 172.0.0.5/24 ipv4.gateway "" \
+  ipv4.never-default yes ipv6.method disabled connection.autoconnect no
+```
+
+⚠️ **This note previously recommended `ipv4.dad-timeout 0` and blamed ARP duplicate-
+address detection. That is WRONG and was disproven on 2026-07-30.** A fresh profile
+with `dad-timeout 0` failed identically, and the NetworkManager journal shows why:
+
+```
+supplicant interface state: 4way_handshake -> completed
+Activation: (wifi) Stage 2 of 5 (Device Configure) successful.
+dhcp4 (wlp39s0): activation: beginning transaction (timeout in 45 seconds)   ... no lease
+```
+
+**Association succeeds; the device's DHCP server does not answer.** DAD is not
+involved, so disabling it cannot help. The static address is not hiding a DHCP
+problem — the DHCP problem is device-side, real, and unfixed. Verified with the
+static profile: ICMP 3/3 to `172.0.0.1`, `POST /login` 302 + cookie in 0.35 s.
+
+**The AP credentials are `BruceNet` / `brucenet`** (`settings wifiAp`), and the
+gateway is **172.0.0.1**.
+
+**The repo ships no `.venv`.** Create it before using any bench script:
+`python3 -m venv .venv && .venv/bin/pip install bleak`.
+
+⚠️ **Never `pkill -f usbwatch2`** — the pattern matches the invoking shell's own
+command line and kills the whole session. Use `pgrep -af "python.*usb"` to find it.
