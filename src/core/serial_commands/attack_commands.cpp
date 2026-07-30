@@ -53,11 +53,6 @@ uint32_t evilportalCmdCallback(cmd *c) {
     if (ssid.isEmpty()) ssid = "Free Wifi";
     uint8_t channel = (uint8_t)chStr.toInt();
     if (channel < 1 || channel > 13) channel = 6;
-    // Default gateway to 192.168.4.1 for phone captive-portal compatibility
-    // (172.0.0.1 breaks Android/iOS auto-detection — phones expect 192.168.4.1)
-    if (bruceConfig.evilPortalGatewayIp.isEmpty()) {
-        bruceConfig.evilPortalGatewayIp = "192.168.4.1";
-    }
 
     if (cmd.getArgument("bg").isSet()) {
         String durStr = cmd.getArgument("duration").getValue();

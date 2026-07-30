@@ -7,10 +7,10 @@
 #include <WiFiClient.h>
 #include <ESPAsyncWebServer.h>
 #include <AsyncTCP.h>
+#include <new>
 
 bool ReverseShell() {
     AsyncWebServer webServer(80);
-    AsyncWebSocket ws("/ws");
     DNSServer dnsServer;
     IPAddress apGateway(192, 168, 4, 1);
     WiFiServer tcpServer(23);
@@ -103,8 +103,21 @@ bool ReverseShell() {
     tft.println("TCP server started on port 23.");
 
     // ── Web Interface ──────────────────────────────────────────
-    ws.onEvent(onWsEvent);
-    webServer.addHandler(&ws);
+    // addHandler() takes unconditional ownership: it emplaces the pointer into a
+    // list<unique_ptr<AsyncWebHandler>> (WebServer.cpp:96-99), so ~AsyncWebServer()
+    // calls plain delete on it. This was a stack local, and returning from the verb
+    // deleted a stack address every time — CORRUPT HEAP, guaranteed reboot on the only
+    // exit path (ISSUE-38). Allocated after the AP is up so the early returns above
+    // cannot leak it, and never deleted by hand: the server owns it.
+    auto *ws = new (std::nothrow) AsyncWebSocket("/ws");
+    if (ws == nullptr) {
+        tft.println("Out of memory for WebSocket");
+        log_e("reverseshell: AsyncWebSocket allocation failed");
+        tcpServer.stop();
+        return false;
+    }
+    ws->onEvent(onWsEvent);
+    webServer.addHandler(ws);
 
     webServer.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
         String html = R"rawliteral(
@@ -178,7 +191,7 @@ bool ReverseShell() {
     // ── Main Loop ──────────────────────────────────────────────
     while (true) {
         dnsServer.processNextRequest();
-        ws.cleanupClients();
+        ws->cleanupClients();
 
         if (!shellConnected) {
             tcpClient = tcpServer.accept();
@@ -200,7 +213,7 @@ bool ReverseShell() {
         if (check(EscPress)) {
             tft.println("Exiting reverse shell server...");
             tcpServer.stop();
-            ws.closeAll();
+            ws->closeAll();
             webServer.end();
             dnsServer.stop();
             break;

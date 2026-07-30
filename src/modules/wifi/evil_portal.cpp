@@ -19,7 +19,7 @@ EvilPortal::EvilPortal(
     String templateFile
 )
     : apName(tssid), _channel(channel), _deauth(deauth), _verifyPwd(verifyPwd), _autoMode(autoMode),
-      _backgroundMode(backgroundMode), _autoTemplateFile(templateFile), webServer(80), _launchTime(millis()) {
+      _backgroundMode(backgroundMode), _autoTemplateFile(templateFile), webServer(80) {
     dnsServer = &sharedEvilPortalDnsServer();
 
     _originalWifiMode = WiFi.getMode();
@@ -49,32 +49,6 @@ EvilPortal::~EvilPortal() {
     // answered GET /hotspot-detect.html with 200 in 11 ms. shutdown() is idempotent,
     // so the paths that already call it explicitly are unaffected.
     shutdown();
-}
-
-void EvilPortal::CaptiveRequestHandler::handleRequest(AsyncWebServerRequest *request) {
-    AsyncResponseStream *response = request->beginResponseStream("text/html");
-    String url = request->url();
-    if (url == "/") _portal->portalController(request);
-    else if (url == "/post") _portal->credsController(request);
-    else if (
-        url == bruceConfig.evilPortalEndpoints.getCredsEndpoint &&
-        bruceConfig.evilPortalEndpoints.allowGetCreds
-    )
-        request->send(200, "text/html", _portal->creds_GET());
-    else if (
-        url == bruceConfig.evilPortalEndpoints.setSsidEndpoint && bruceConfig.evilPortalEndpoints.allowSetSsid
-    ) {
-        if (request->hasArg("ssid")) {
-            _portal->apName = request->arg("ssid").c_str();
-            request->send(200, "text/html", _portal->ssid_POST());
-            _portal->_pendingWifiRestart = true;
-        } else {
-            request->send(200, "text/html", _portal->ssid_GET());
-        }
-    } else {
-        if (request->args() > 0) _portal->credsController(request);
-        else _portal->portalController(request);
-    }
 }
 
 bool EvilPortal::setup() {
@@ -265,7 +239,17 @@ void EvilPortal::setupRoutes() {
         webServer.on(
             bruceConfig.evilPortalEndpoints.setSsidEndpoint.c_str(), [this](AsyncWebServerRequest *request) {
                 if (request->hasArg("ssid")) {
-                    apName = request->arg("ssid").c_str();
+                    String newSsid = request->arg("ssid");
+                    // This route is unauthenticated and reachable by anyone associated to
+                    // the portal's own open AP. An empty or over-length value drives
+                    // restartWiFi()'s WiFi.softAP() into a failure that takes the AP down
+                    // for good, so one request ended the whole attack (ISSUE-34). 32 is
+                    // the 802.11 SSID limit.
+                    if (newSsid.isEmpty() || newSsid.length() > 32) {
+                        request->send(400, "text/html", "invalid ssid");
+                        return;
+                    }
+                    apName = newSsid;
                     request->send(200, "text/html", ssid_POST());
                     _pendingWifiRestart = true;
                 } else {
@@ -292,17 +276,12 @@ void EvilPortal::setupRoutes() {
             portalController(request);
         }
     });
-
-    _captiveHandler = new CaptiveRequestHandler(this);
-    webServer.addHandler(_captiveHandler).setFilter(ON_AP_FILTER);
 }
 
 void EvilPortal::restartWiFi(bool reset) {
     webServer.end();
     dnsServer->stop();
     vTaskDelay(100 / portTICK_PERIOD_MS);
-
-    _captiveHandler = nullptr;
 
     wifiDisconnect();
     // The restart path did not even capture softAP()'s return, so a portal that lost
@@ -443,41 +422,17 @@ String EvilPortal::getCapturedPassword() { return lastCred; }
 
 String EvilPortal::getCapturedSSID() { return apName; }
 
-void EvilPortal::setBaseDuration(uint16_t seconds) { _baseDurationSec = seconds; }
-
-void EvilPortal::setExtendedDuration(uint16_t seconds) { _extendedDurationSec = seconds; }
-
-bool EvilPortal::hasRecentActivity() {
-    if (totalCapturedCredentials > previousTotalCapturedCredentials) {
-        _lastActivityTime = millis();
-        return true;
-    }
-    return (millis() - _lastActivityTime < 5000);
-}
+// A base/extended duration policy used to live here. shouldTerminate() was its only
+// reader and nothing ever called it, so karma configured a portal time limit that could
+// never fire (ISSUE-35). Removed rather than wired up: the blocking portal has no caller
+// for setBaseDuration(), so loop() would have self-exited on the 15 s default, and
+// processRequests() would have overridden the background portal's own -duration cap with
+// it. karma already implements exactly this policy inline against its own launchTime
+// (karma_attack.cpp:1711-1739), and that one works.
 
 bool EvilPortal::hasRecentPageView() { return (millis() - _lastPageViewTime < 30000); }
 
 void EvilPortal::recordPageView() { _lastPageViewTime = millis(); }
-
-bool EvilPortal::shouldTerminate() {
-    unsigned long currentTime = millis();
-    unsigned long elapsed = currentTime - _launchTime;
-
-    if (_durationExtended) {
-        return elapsed > (_extendedDurationSec * 1000);
-    } else {
-        return elapsed > (_baseDurationSec * 1000);
-    }
-}
-
-void EvilPortal::checkAndExtendDuration() {
-    if (_durationExtended) return;
-
-    if (hasRecentActivity()) {
-        _durationExtended = true;
-        Serial.println("[PORTAL] Activity detected, extending duration");
-    }
-}
 
 void EvilPortal::drawScreen() {
     drawMainBorderWithTitle("EVIL PORTAL");

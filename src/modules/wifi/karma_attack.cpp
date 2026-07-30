@@ -1706,8 +1706,6 @@ void checkPortals() {
     }
 
     if (activePortal->instance != nullptr) {
-        activePortal->instance->checkAndExtendDuration();
-
         unsigned long portalAge = now - activePortal->launchTime;
 
         // If we got credentials, terminate immediately
@@ -1789,8 +1787,9 @@ void launchBackgroundPortal(
         return;
     }
 
-    portal->instance->setBaseDuration(attackConfig.baseDuration / 1000);
-    portal->instance->setExtendedDuration(attackConfig.extendedDuration / 1000);
+    // attackConfig.baseDuration / extendedDuration used to be pushed into the portal
+    // here. Nothing in EvilPortal ever checked them (ISSUE-35); the timeout that
+    // actually runs is the one in portalHeartbeat() below, against launchTime.
 
     activePortal = portal;
     activePortalChannel = channel;
