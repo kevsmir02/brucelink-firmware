@@ -35,10 +35,12 @@ void test_every_result_has_a_distinct_slug() {
     const char *b = webUiResultSlug(WebUiStartResult::WifiBringUpFailed);
     const char *c = webUiResultSlug(WebUiStartResult::RefusedLowDmaPreAlloc);
     const char *d = webUiResultSlug(WebUiStartResult::FailedNotListening);
+    const char *e = webUiResultSlug(WebUiStartResult::SelftestAlreadyServing);
     TEST_ASSERT_EQUAL_STRING("started", a);
     TEST_ASSERT_EQUAL_STRING("wifi_bringup_failed", b);
     TEST_ASSERT_EQUAL_STRING("low_dma_pre_alloc", c);
     TEST_ASSERT_EQUAL_STRING("not_listening", d);
+    TEST_ASSERT_EQUAL_STRING("selftest_already_serving", e);
 }
 
 void test_report_renders_every_field_on_one_line() {
