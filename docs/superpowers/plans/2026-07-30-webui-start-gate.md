@@ -570,7 +570,22 @@ The resulting tail:
 bool startWebUi(bool mode_ap = false, bool background = false);
 ```
 
-The three `lambdaHelper(startWebUi, …)` call sites (`webInterface.cpp:100,107,108`) and `startup_app.cpp:44` need no change: `lambdaHelper` is `return [=]() { (void)callback(args...); };` (`globals.h:178-181`), which discards any return type.
+The three `lambdaHelper(startWebUi, …)` call sites (`webInterface.cpp:100,107,108`) and `startup_app.cpp:44` need no change *for the `bool` return*: `lambdaHelper` is `return [=]() { (void)callback(args...); };` (`globals.h:178-181`), which discards any return type.
+
+> ⚠️ **Corrected 2026-07-31 — this paragraph was wrong twice.**
+>
+> 1. **`startup_app.cpp:44` is not a `lambdaHelper` site.** It is a direct call in
+>    statement context — `_startupApps["WebUI"] = []() { startWebUi(!wifiConnecttoKnownNet()); };`
+>    It compiles unchanged because a discarded return is fine in statement context and
+>    because C++ default arguments *do* apply to a direct call, not because of anything
+>    `lambdaHelper` does. Grouping it with the other three misattributes the reason.
+> 2. **"Need no change" did not survive Task 5.** `lambdaHelper` takes a **function
+>    pointer**, so `std::decay_t<Args>...` is deduced from the pointer's type and C++
+>    **default arguments do not apply**. The moment Task 5 added the third `selftest`
+>    parameter, all three sites had to pass it explicitly — they now read
+>    `lambdaHelper(startWebUi, opt, false, false)` and
+>    `lambdaHelper(startWebUi, true, false, false)` (`webInterface.cpp:102,109,110`).
+>    **Arity changes are never free through `lambdaHelper`.**
 
 - [ ] **Step 5: Make the verb return the outcome**
 
@@ -783,6 +798,21 @@ EOF
 ---
 
 ### Task 6: Hardware verification
+
+> ⚠️ **Executed 2026-07-31. Three corrections to the procedure below — read before reusing it.**
+>
+> 1. **The `js` recipe in Step 3 does not induce anything.** ISSUE-17 is resolved: the
+>    ~17.8 KB is the interpreter task's stack and the idle task reclaims it inside one
+>    BLE round trip. Measured `free` **identical** before and after (80,751 / dma
+>    31,732). Gates are only reachable by sending `js` and `webui` in a **single BLE
+>    write**, so the serial task drains them back-to-back.
+> 2. **"Confirm `free` returns to its ~81,000/31,732 idle plateau" is wrong.** That is a
+>    *fresh-boot* figure. The clean-teardown reference is **~58,000 / dma 19,444–20,468**
+>    — already recorded in ISSUE-17 as 57,435/19,444 for `webui -off`.
+> 3. **An `nmcli` rescan only proves an AP is gone after ~15 s**; NetworkManager keeps a
+>    stopped BSS in its list until then. Take the positive control first.
+>
+> Results, and the ISSUE-43 panic this task found, are in `docs/KNOWN_ISSUES.md`.
 
 **Files:** none. **Requires the board attached at `/dev/ttyACM0`.** Steps 3 and 4 need an operator only if the device needs a physical reset; the dispatches themselves are remote.
 

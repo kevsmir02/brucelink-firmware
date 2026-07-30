@@ -6,6 +6,15 @@ earlier design note disagrees with what is written here, the code wins. See
 and [KNOWN_ISSUES.md](./KNOWN_ISSUES.md) for verified defects — read that before
 planning against any verb; this document covers *what the interface is*.
 
+**Contract version:** 2.5 — updated 2026-07-31 for RC3 (the `webui` start gate), with every
+claim below re-checked against the tree at ELF `8a30e3153a15326a`. New in 2.5: **`webui` now
+reports a real start outcome** on the CLI reply and as a `log` frame, and its `[CLI] Result:`
+is the one that can be trusted (§1.x); **`level:"err"` has producers for the first time** —
+declared since 2.3 with none, so an app that ignored it will now miss WebUI failures; the
+claim that dispatch/result were the **only** `log` source is **corrected** — five other
+producers exist, one of them already at `warn`; the drifted `serialcmds.cpp` citations are
+fixed; and **`webui -selftest`** is documented. Below this line, 2.4's history is retained.
+
 **Contract version:** 2.4 — re-audited against `5c408e6d` on 2026-07-30, after version 2.3
 had drifted **45 commits** behind HEAD (17 of them touching `src/`). New in 2.4, all found
 by reading the code rather than the docs: the **`attack_result` frame** exists and was
@@ -128,6 +137,39 @@ which point notifies truncate and HTTP dies
 (`src/core/serial_commands/wifi_commands.cpp:58`). Use `webui -off` to hand the
 WiFi memory back when done with bulk transfer, `webui -bg` to bring it back. Both
 verified over BLE 2026-07-29; see §7.1 for the full heap figures.
+
+### 1.x `webui`'s start outcome — the one `[CLI] Result:` you can trust
+
+**`webui` is the exception to §ISSUE-7's "`Result: TRUE` means nothing".** Every attack
+callback ends in a bare `return true`, but `startWebUi()` returns a real `bool` and
+`webuiCallback` returns it, so `[CLI] Result: FALSE` from `webui` genuinely means the
+WebUI is not serving. Do not generalise this to the attack verbs.
+
+The verb also emits **one report line** on the CLI reply *and* as a `log` event frame:
+
+```
+webui: <slug> mode=ap|sta dma=<N> required=15360 tcp_state=<N>
+```
+
+One line, one field per token, deliberately — a BLE reply can truncate (§ISSUE-16) and a
+half-received line must still be readable. `tcp_state` is lwIP's TCP state as read from
+`AsyncWebServer::state()`; `1` is `LISTEN`, `0` is closed.
+
+| slug | meaning | `Result:` |
+|---|---|---|
+| `started` | port 80 is listening | `TRUE` |
+| `wifi_bringup_failed` | the AP/STA never came up — refused for memory, or `softAP()` failed | `FALSE` |
+| `low_dma_pre_alloc` | refused: contiguous DMA block below 15,360 with the AP already up | `FALSE` |
+| `not_listening` | the server was built but `begin()` did not leave a listening socket | `FALSE` |
+| `selftest_already_serving` | `-selftest` against a WebUI that is already up; nothing to force | `FALSE` |
+
+All five verified against the firmware 2026-07-31; `started`, `wifi_bringup_failed`,
+`low_dma_pre_alloc` and `not_listening` were each produced on hardware that day.
+
+⚠️ **A `started` does not promise the WebUI will serve every request.** The gates prove
+the socket is listening; they do not cover the marginal case where a *request's* body
+allocation fails (§ISSUE-12). `dma=` on a success line is reported for exactly that
+reason — treat a small figure as a warning, not a verdict.
 
 ---
 
@@ -343,8 +385,23 @@ switching on `device_state` would meet values this contract never named:
 Treat `device_state` as an open string, not an enum.
 
 `log` frames are emitted for every CLI command dispatch and its result
-(`serialcmds.cpp:45,52,64,68`) — `COMMAND: <text>` then `[CLI] Result: TRUE|FALSE`.
-That is the only `log` source; general CLI stdout is **not** forwarded to `/ws`.
+(`serialcmds.cpp:65,72,85,89`) — `COMMAND: <text>` then `[CLI] Result: TRUE|FALSE`.
+General CLI stdout is **not** forwarded to `/ws`.
+
+⚠️ **Corrected in 2.5: that is *not* the only `log` source.** The previous wording said
+so and it was false. Every `pushWsLog()` producer in the tree, verified 2026-07-31:
+
+| Source | Level |
+|---|---|
+| `serialcmds.cpp:65,72,85,89` — dispatch + result | `info` |
+| `webInterface.cpp:773` — the WebUI start report | `info` on success, **`err`** on failure |
+| `evil_portal_bg.cpp:37,102,150` — portal started/stopped/duration cap | `info` |
+| `evil_portal_bg.cpp:146` — credentials captured | **`warn`** |
+| `globals_js.cpp:287`, `serial_js.cpp:54` — JS `print()` output, prefixed `[js] ` | `info` |
+
+**`level:"err"` was declared in this contract but had zero producers until 2026-07-31.**
+`webInterface.cpp:773` is the first, and currently the only one. An app that ignored
+`err` because nothing ever sent it will now miss WebUI start failures.
 
 **Use these two frames as your dispatch ACK and completion signal.** `COMMAND:` is
 pushed *before* `serialCli.parse()` runs and `[CLI] Result:` *after*
@@ -430,7 +487,8 @@ needs both answers, so they are now separate columns.
 | `free` | no | immediately | — | one-line heap report incl. **largest contiguous DMA block**, which is what actually gates radio init |
 | `crashlog` / `crashlog -clear` | no | immediately | — | Reads the ELF core dump a panic stored in flash: `reset_reason`, faulting task, `exc_pc`, on-device Xtensa backtrace, the dump's `app_elf_sha256`, plus the **running** firmware's sha and a `match=` verdict so a decode can be validated with no console attached. `-clear` erases it. `crash: none stored` when clean. **A wedge writes no dump** (no panic, no watchdog), and the next crash overwrites the last |
 | `webui -off` | no | immediately | — | stops the WebUI **and its AP**; frees the memory for BLE. Verified 2026-07-29 |
-| `webui -bg` | no | immediately | — | starts the WebUI and returns instead of holding the screen. Returned in 357 ms, 2026-07-29. Still prints "Press ESC to quit" — stale text, it does return |
+| `webui -bg` | no | immediately | `log` (`info` on success, **`err`** on failure) | starts the WebUI and returns instead of holding the screen. Returned in 357 ms, 2026-07-29. Still prints "Press ESC to quit" — stale text, it does return. **Since 2026-07-31 it reports a real outcome** — see below |
+| `webui -selftest [-bg]` | no | immediately | `log` at **`err`** | **Diagnostic.** Starts the server for real, then forces the post-`begin()` LISTEN check to fail so the failure branch and its unwind actually execute. Always returns `FALSE`. Against an already-serving WebUI it refuses with `selftest_already_serving` rather than reporting a test that never ran. Verified on hardware 2026-07-31 |
 | `blespam <type> <count>` | no | **after the burst** | `state`, `ble_progress`, `ble_result` — but see below | self-completing, verified 5/5. `fastpair_*` fixed in `c9c43c03` (§5.1). Suspends the BLE link for **0.5–11.9 s** (measured); tolerate ~12 s. Types in §5.1; count < 1 → 10 |
 | `evilportal <ssid> <ch> [template]` | **YES** | **only after dismissal** | ⚠️ `state: portal` only | The **blocking** form. defaults: ssid `Free Wifi`, ch `6`. **CRASHES UNDER LOAD** — same `xTaskPriorityDisinherit` assert as `deauth`, ELF-matched backtrace, ~11 min with a client associated (KNOWN_ISSUES §ISSUE-1); unchanged by the headless work. Also commits DNS/HTTP state even when the AP failed to start (§ISSUE-28). Do **not** ship as a one-tap action — **use `-bg`** |
 | `evilportal -bg [-duration <sec>]` | **no** — returns immediately | `-off`, or the duration cap | `state`, `ble_progress`-style portal frames | **Headless, and the one menu-dispatcher verb that is safe to ship.** `uptime` over BLE answered in 0.06 s during a live portal; cap self-stopped at +45.6 s. Cap default **600 s**, `0` = unlimited, malformed values rejected. **Serves the full page with BLE armed** since ELF `e81b0c28f80e70dd` — 8/8 loads, all 4,726 bytes, form included (§ISSUE-21 resolved) |

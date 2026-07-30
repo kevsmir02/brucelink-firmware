@@ -52,12 +52,19 @@ Consequences that shape most of the code:
 - **The two transports coexist, but with almost no margin.** Measured 2026-07-29:
   from a *fresh boot* `webui` starts fine and `systeminfo` answers over BLE with the
   AP up (`free_heap:14140`), and a laptop associates and gets a DHCP lease. From a
-  boot where anything already took ~18 KB — a single `js` run is enough (ISSUE-17) —
-  the same command silently starts nothing: AsyncTCP fails to allocate with 1,235
-  bytes free, the AP beacons but cannot accept a station, and BLE replies truncate to
-  1 byte. `webui -bg` reports success either way. See `docs/KNOWN_ISSUES.md` §ISSUE-12.
+  boot where anything already took ~18 KB, the same command starts nothing: AsyncTCP
+  fails to allocate with 1,235 bytes free, the AP beacons but cannot accept a station,
+  and BLE replies truncate to 1 byte. See `docs/KNOWN_ISSUES.md` §ISSUE-12.
   **This entry first claimed the transports were mutually exclusive; that was wrong,
   generalised from one run launched off a dirty baseline.**
+  **Two further corrections, 2026-07-31.** *"`webui -bg` reports success either way"* is
+  no longer true — RC3 gates the start and reports a real outcome on four channels, and
+  `[CLI] Result: FALSE` from `webui` now means it is not serving. And *"a single `js` run
+  is enough"* is no longer true either: ISSUE-17 is resolved — the ~17.8 KB is the
+  interpreter task's stack and the FreeRTOS idle task reclaims it within one BLE round
+  trip, so `js` then `webui` as separate commands measures **no** heap difference. What
+  RC3 does **not** fix is the marginal case where the listener starts and a *request's*
+  allocation fails; ISSUE-12 stays OPEN for that.
 - Never let both radios be loaded at once. `blespam` suspends the BLE API *before*
   touching NimBLE, which frees ~62 KB and takes the DMA block from ~1.3 KB to ~32 KB.
 - Ordering is everything. Tearing BLE down cleanly *before* an attack means the
@@ -298,6 +305,12 @@ with `-DRF_DEBUG=1` if you want them.
   | `f54bbc6c` | `46d975be7d38f128` |
   | `afa17b57` | `2efaeec784a5768a` |
   | `3629afd7` | `3dd17e72827f4325` |
+  | `253860a0` | `8a30e3153a15326a` (RC3; flashed and verified on hardware 2026-07-31) |
+
+  `690cf842` differs from `253860a0` only under `test/`, which `[env:smoochiee-board]`
+  does not compile, so it should produce the same ELF — **not rebuilt to confirm**, so
+  treat that as inference, not measurement. Docs-only commits after `253860a0` likewise
+  do not change it.
 
   ⚠️ **`TEST_STATUS.md` credits `76d42c72f2b4a8a4` to firmware "`fbfe6226`". That is wrong** —
   the commit that produces it is **`4c4378a1`**, confirmed by rebuild. Treat any
@@ -367,6 +380,17 @@ with `-DRF_DEBUG=1` if you want them.
   returns only a lone `SCREEN_INFO` packet over BLE. `display start` would enable it
   but streams *raw binary* draw packets onto the CLI characteristic, corrupting EOT
   framing.
+- **`Serial` is the native USB-CDC port and reaches nothing on this board.** The bench
+  reads the **UART bridge**, which carries `ESP_LOG` and panic output — not `Serial`
+  (`ram_profile.cpp:9-18`). `RAM_LOG` reaches the console only because it explicitly
+  mirrors to UART0 TX GPIO43 (`ram_profile.cpp:19-32`). **`log_e` is the only compiled
+  log level** (`-DCORE_DEBUG_LEVEL=1`, `boards/smoochiee-board/smoochiee-board.ini:21`),
+  so `log_i`/`log_w` are stripped and are not an option. This one fact is the root cause
+  behind ISSUE-2, ISSUE-22, ISSUE-42 **and** ISSUE-19's stalled attribution — a
+  diagnostic written with `Serial.printf` is not weak evidence when it fails to appear,
+  it is *no* evidence, because it was never addressed to the console being watched.
+  Anything the app or the bench must read goes to `serialDevice->` (CLI reply),
+  `log_e` (console) or `pushWsLog` (event stream).
 - **Line numbers in docs drift.** Citations were correct when written; grep for the
   symbol if a line does not match.
 

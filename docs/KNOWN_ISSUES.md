@@ -761,6 +761,73 @@ elapsed time is not implicated.**
 
 ---
 
+**ROOT CAUSE FOUND AND GATED 2026-07-31 (RC3). The entry stays OPEN: the silent-success
+half is fixed, the marginal-allocation half is not.**
+
+**The root cause was that `startWebUi()` had no failure detection at all.** It ran no
+memory gate, set `isWebUIActive = true` unconditionally, and returned `void`, so no
+caller could report an outcome. `webInterface.cpp:767` — which an earlier draft of this
+entry treated as the failure report — is `Serial.println("Configuring Webserver ...")`,
+a *progress* line. There was nothing to redirect.
+
+**The fix** (commits `23ebd1f7`, `a6da3c1f`, `22c5ed6a`, `13d45111`, `085bdd49`,
+`de11201c`, `690cf842`; ELF **`8a30e3153a15326a`**) adds four ordered decision points:
+
+| | Where | Decides on |
+|---|---|---|
+| A | `wifiConnectMenu()`'s `WIFI_AP` case (`wifi_common.cpp:201`) | `radioHasMemForWifi()` |
+| B | `_setupAP()` (`wifi_common.cpp:142`) | honours `WiFi.softAP()`'s return |
+| C | `startWebUi()` at the `RAM_LOG("webui pre-alloc")` mark (`webInterface.cpp:837`) | `radioHasMemForWifi()` |
+| D | after `begin()` (`webInterface.cpp:~855`) | `server->state() == LISTEN` |
+
+`isWebUIActive` moves behind gate D, `startWebUi()` returns `bool`, and every outcome
+goes to four channels (console `log_e`/`RAM_LOGF`, event frame, CLI reply, non-blocking
+red stripe). **The threshold stays `RADIO_WIFI_MIN_DMA_BLOCK` (15,360), deliberately** —
+see the run-2 row below.
+
+**All three refusal gates induced on hardware 2026-07-31**, device `1C:DB:D4:5E:D7:39`,
+ELF `8a30e3153`:
+
+| Gate | Recipe | Reported | Unwound? | Panic |
+|---|---|---|---|---|
+| baseline | fresh boot `webui -bg` | `started mode=ap dma=6900 tcp_state=1` | n/a | no |
+| **A** | `webui -bg` → `-off`, then the one-write race | `wifi_bringup_failed dma=7412` | no AP raised | **1 of 3 — see ISSUE-43** |
+| **C** | fresh boot + the one-write race | `low_dma_pre_alloc dma=2676` | yes | no |
+| **D** | `webui -selftest -bg` | `not_listening dma=6900 tcp_state=0` | yes | no |
+
+Each refusal produced `[CLI] Result: FALSE` and an event frame at `level:"err"` — the
+first real producers of that level in the firmware. Gate D freed a **live**
+`AsyncWebServer` without panicking.
+
+**How to induce these, because the obvious recipe does not work.** ISSUE-17 is resolved:
+`js`'s ~17.8 KB is the interpreter task's stack and the FreeRTOS idle task reclaims it
+inside one BLE round trip. Sequential `js` then `webui` measured `free` **identical**
+before and after (80,751 / dma 31,732), with only `minEver` dipping to 56,539 — it
+induces nothing. Sending **both verbs in a single BLE write** makes the serial task
+drain them back-to-back with no window for the idle task, and that is what reaches the
+gates.
+
+**⚠️ NOT FIXED: the marginal class.** ISSUE-12's own run 2 (`webui pre-alloc` dma
+**18,420**) cleared 15,360, logged no AsyncTCP error, accepted TCP and failed only when
+a request's body could not be allocated. Gate C passes it and gate D passes it, both
+**correctly** — port 80 genuinely was listening. Neither layer addresses per-request
+allocation failure. A host test pins `webUiDmaSufficient(18420, 15360) == true`
+specifically so nobody "fixes" this by inventing a threshold in the 18,420–19,444 gap,
+which rests on a single observation.
+
+**Correction to the verification recipe used against this entry:** "confirm `free`
+returns to its ~81,000 / 31,732 idle plateau" is wrong for any post-`webui` check —
+that is a *fresh-boot* figure. The clean-teardown reference is **~58,000 / dma
+19,444–20,468**, which this file already recorded above as 57,435/19,444 for
+`webui -off`. Measured four times on 2026-07-31 at 58,071 / 58,079 / 58,143 / 58,259.
+
+**And an `nmcli` rescan only proves an AP is gone after ~15 s.** NetworkManager ages a
+stopped BSS out of its list within that window (measured 0 entries at t+15/30/45/60/75/90 s);
+the positive control is that `BruceNet` (BSSID `1E:DB:D4:5E:D7:38`) *is* listed while the
+AP is up. A rescan taken immediately after teardown will show the AP and mean nothing.
+
+---
+
 ### ISSUE-13 — `encrypt` then `decrypt` fails ~62% of the time, silently
 
 **Status:** RESOLVED in `b1c825c8` · **Severity:** high (silent data loss to the user's eye) ·
@@ -1408,13 +1475,27 @@ mechanisms destroy the HTTP transport before it can be used:
   `radioHasMemForBle()` (`BLE_Suite.cpp:313`), whose precondition is measured — the
   largest DMA block with the WebUI up was **7,156**, under the 15,360
   `RADIO_BLE_MIN_DMA_BLOCK` threshold (`radio_mem.h:32`) — and whose fallback calls
-  `wifiDisconnect()`. But **neither** its `[RAM] Low contiguous DMA memory…` line nor
-  `displayError("Low RAM: free WiFi/SD first")` appears in the capture. The other
-  candidate, the explicit `wifiDisconnect()` at `BLE_Suite.cpp:302-311`, is **ruled
-  out**: it is gated on `FORCE_RADIO_TEARDOWN_ON_SWITCH`, which is `false` here
-  because the PSRAM-conditional around it is disabled by an `#if 0`
-  (`ble_common.h:32-40`). The USB console has demonstrably dropped output under
-  memory pressure this session, so the missing log line is weak evidence either way.
+  `wifiDisconnect()`. The other candidate, the explicit `wifiDisconnect()` at
+  `BLE_Suite.cpp:302-311`, is **ruled out**: it is gated on
+  `FORCE_RADIO_TEARDOWN_ON_SWITCH`, which is `false` here because the
+  PSRAM-conditional around it is disabled by an `#if 0` (`ble_common.h:32-40`).
+
+  ⚠️ **This entry's "neither log line appears in the capture" argument is WITHDRAWN
+  (2026-07-31). It was not weak evidence — it was no evidence, invalid by
+  construction.** Both lines were unobservable on that capture whatever the firmware
+  did: `radio_mem.h:48,62,67` wrote them with `Serial.printf`/`Serial.println`, and
+  `Serial` on this board is the **native USB-CDC port** while the bench reads the
+  **UART bridge** (`ram_profile.cpp:9-18`, ISSUE-22). `RAM_LOG` reaches the console
+  only because it explicitly mirrors to UART0 TX GPIO43 (`ram_profile.cpp:19-32`).
+  `displayError` additionally draws to the TFT and its console half is also `Serial`
+  (`display.cpp:317`), so it could never have appeared in a serial capture at all.
+  The earlier hedge — "the USB console has demonstrably dropped output under memory
+  pressure" — understated this: the lines were never addressed to that console.
+
+  **`13d45111` converts all three to `log_e`, which does reach it**, so the next
+  repro can settle the attribution. **The attribution stays SUSPECTED** — this change
+  makes it testable; it does not test it. Nothing has yet re-run the `blesniffer`
+  scenario against a build that can report.
 
 **So the rescue only works for blocking verbs that touch neither radio** — `ap_info`
 and possibly `pwngrid`. For `deauth`, `karma`, `evilportal`, `sniffer` and
@@ -2265,6 +2346,22 @@ and ESP-IDF accepts the oversized `ssid_len`. Reaching `beginAP()`'s branch need
 resource exhaustion, or a temporary test hook. The constructor's `if (!apUp) return;`
 guard is likewise unexercised.
 
+**A third site of this exact shape existed, on the path `webui` actually takes — fixed
+2026-07-31 (`a6da3c1f`).** `_setupAP()` (`wifi_common.cpp:142-150`) discarded
+`WiFi.softAP()`'s return, set `wifiConnected = true` and returned `true`
+unconditionally, so a failed AP left every caller believing one existed. It now returns
+`false` with a `log_e` naming the SSID. Its three callers: `wifi_common.cpp:184` (the
+intended path, now checked); `wifi_commands.cpp:37`, where `wifi on`'s AP fallback
+`return _setupAP()` becomes truthful instead of claiming success unconditionally; and
+`attack_commands.cpp:174`, which **still discards the return** — out of scope, recorded
+here so it is not mistaken for covered.
+
+**ISSUE-28's own status stays OPEN.** `beginAP()`'s branch is still CLI-unreachable and
+still unverified; nothing above changes that. The lesson was applied to RC3, though —
+gate D ships with a permanent `webui -selftest` (`085bdd49`) precisely so it would not
+end up correct-and-permanently-unverifiable the way `beginAP()` did. That flag was used
+on 2026-07-31 to verify gate D on hardware.
+
 ---
 
 ### ISSUE-29 — ~~`POST /cm cmnd=nav` latches button globals that the main menu never clears~~ (premise refuted)
@@ -2874,6 +2971,80 @@ by reading back `options[forceMenuOption]` *after* assigning it — but `forceMe
 (`display.cpp:742-744`), so an unlucky interleave indexes `options[-1]`. It now reports
 from the local `opt`. Never observed firing; found by reading the path. Same family as
 ISSUE-41 — a global mutated by another task, read back after a hand-off.
+
+---
+
+### ISSUE-43 — the webui gate-A refusal panicked in the WiFi driver, 1 run in 3
+
+**Status:** OPEN · **Severity:** high (device reboots) · **Observed once in three
+identical trials** 2026-07-31, device `1C:DB:D4:5E:D7:39`, ELF `8a30e3153` ·
+**Mechanism SUSPECTED**
+
+Found while verifying RC3 (ISSUE-12). Gate A refuses the AP when the contiguous DMA
+block is short; the refusal itself behaved correctly every time — it logged, reported on
+all four channels and raised no AP. But on **one of three** runs the device panicked
+~290 ms later:
+
+```
+[E][wifi_common.cpp:202] wifiConnectMenu(): AP refused, largest DMA block 7412 < 15360 required
+[E][webInterface.cpp:771] reportWebUiStart(): webui: wifi_bringup_failed mode=ap dma=7412 ...
+Guru Meditation Error: Core 0 panic'ed (LoadProhibited)
+EXCVADDR: 0x0000002c   EXCCAUSE: 0x1c   A2: 0x00000000
+```
+
+Decoded, and confirmed against the stored core dump (`task=wifi`, `match=yes`):
+
+```
+ieee80211_hostap_attach  <- null deref
+wifi_softap_start
+_do_wifi_start
+wifi_start_process
+ieee80211_ioctl_process
+ppTask
+vPortTaskWrapper                        port.c:139
+```
+
+**The faulting task is `wifi` (ppTask), not the serial task** — so this is not ISSUE-1's
+TFT/SPI family.
+
+**Localized by an absence.** In the crashing run the panic landed *before* the
+`[E][STA.cpp:540] disconnect(): STA disconnect failed! ESP_ERR_WIFI_NOT_INIT` line that
+**both** surviving runs emit. That line comes from `wifiDisconnect()`'s *second*
+statement, so the crash happened inside its **first** — `WiFi.softAPdisconnect(true)`
+(`wifi_common.cpp:170`).
+
+**Why RC3 owns the call.** Gate A's *memory* refusal returns before
+`WiFi.mode(WIFI_AP)` ever runs (`wifi_common.cpp:201-208`), so on that branch WiFi was
+never brought up. RC3's unwind at `webInterface.cpp:823` nonetheless calls
+`wifiDisconnect()` on **both** gate-A outcomes, because `wifiConnectMenu()` returns a
+bare `bool` and the caller cannot tell "refused for memory" from "`softAP()` failed
+after `WiFi.mode()` already ran". The unwind is genuinely needed for the second; it is
+what reaches a never-started stack in the first. `WiFiGenericClass::mode()` re-runs
+`wifiLowLevelInit()` whenever the current mode is NULL and a non-NULL mode is requested
+(`WiFiGeneric.cpp:607-613`), which is the only mechanism found that could put
+`esp_wifi_start()` on this path — **not verified**, and 1-in-3 reproduction means any
+mechanism claim is provisional.
+
+**Not a regression in the ordinary sense.** Before RC3 there was no gate at all, so this
+state ran straight into `WiFi.mode(WIFI_AP)` + `_setupAP()` under the same exhaustion.
+RC3 makes the device refuse instead — it did not create the exhaustion, and the other
+two gates unwound cleanly in every trial.
+
+**Reproduction** (needs the one-write race; see ISSUE-12 for why sequential dispatch
+cannot induce anything):
+
+```
+webui -bg ; webui -off            # leaves WiFi mode 0, dma ~19,444-20,468
+<single BLE write>  "js run_from_file /t17.js\nwebui -bg\n"
+```
+
+Gate A then refuses at `dma=7412`. Expect a panic roughly one run in three.
+
+**Fix direction (not implemented):** give `wifiConnectMenu()` a way to say *which* gate-A
+outcome occurred — an out-param or a small enum — so the unwind runs only when
+`WiFi.mode(WIFI_AP)` actually executed. The RC3 design deliberately rejected guessing
+between the two from a bare `bool`; this is the case that shows the distinction has to
+be carried rather than inferred.
 
 ---
 
