@@ -71,7 +71,10 @@ uint32_t webuiCallback(cmd *c) {
     bool noAp = arg.isSet();
     bool background = cmd.getArgument("bg").isSet();
 
-    serialDevice->println(String("Starting Web UI ") + !noAp ? "AP" : "STA");
+    // Parenthesised because `+` binds tighter than `?:`: without them the whole
+    // concatenation became the ternary's condition and the client received a bare
+    // "AP"/"STA" with the prefix silently dropped.
+    serialDevice->println(String("Starting Web UI ") + (!noAp ? "AP" : "STA"));
     serialDevice->println("Press ESC to quit");
     startWebUi(!noAp, background); // without bg: quits when check(EscPress)
 
@@ -81,7 +84,10 @@ uint32_t webuiCallback(cmd *c) {
 uint32_t scanHostsCallback(cmd *c) {
     esp_netif_t *esp_netinterface = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
     if (esp_netinterface == nullptr) {
-        Serial.println("Failed to get netif handle\nTry connecting to a network first");
+        // serialDevice, not Serial: this is the verb's only failure text, and Serial
+        // reaches nothing on this board (ISSUE-22), so over BLE `arp` returned a bare
+        // Result: FALSE with no reason.
+        serialDevice->println("Failed to get netif handle\nTry connecting to a network first");
         return false;
     }
 
@@ -98,7 +104,7 @@ uint32_t snifferCallback(cmd *c) {
 
 uint32_t listenTCPCallback(cmd *c) {
     if (!wifiConnected) {
-        Serial.println("Connect to a WiFi first.");
+        serialDevice->println("Connect to a WiFi first.");
         return false;
     }
 
