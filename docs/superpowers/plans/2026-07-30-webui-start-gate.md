@@ -271,11 +271,11 @@ EOF
 ### Task 2: Gates A and B — `wifiConnectMenu`'s AP case and `_setupAP()`
 
 **Files:**
-- Modify: `src/core/wifi/wifi_common.cpp:142-150` (`_setupAP`), `:182-185` (`WIFI_AP` case), `:189-192` (`WIFI_STA` case, one argument)
+- Modify: `src/core/wifi/wifi_common.cpp` — includes; new `errorMayWaitForKey()`; `:142-150` (`_setupAP`), `:182-185` (`WIFI_AP` case), `:189-192` (`WIFI_STA` case, one argument)
 
 **Interfaces:**
-- Consumes: `radioHasMemForWifi()`, `radioLargestDmaBlock()`, `RADIO_WIFI_MIN_DMA_BLOCK` — all from `core/radio_mem.h`, already included at `wifi_common.cpp:5`.
-- Produces: `_setupAP()` and `wifiConnectMenu(WIFI_AP)` now return `false` on a failed or refused AP bring-up. Signatures unchanged (`wifi_common.h:21,73` already declare `bool`).
+- Consumes: `radioHasMemForWifi()`, `radioLargestDmaBlock()`, `RADIO_WIFI_MIN_DMA_BLOCK` — all from `core/radio_mem.h`, already included at `wifi_common.cpp:5`. `serialcmdsTaskHandle`, declared `extern` at `serialcmds.h:6`.
+- Produces: `_setupAP()` and `wifiConnectMenu(WIFI_AP)` now return `false` on a failed or refused AP bring-up. Signatures unchanged (`wifi_common.h:21,73` already declare `bool`). File-static `errorMayWaitForKey()` — not exported.
 
 **No host test is possible.** Both functions call `WiFi.*`; `[env:native]` sets `test_build_src = no`. Verification is the build plus Task 6's hardware run.
 
@@ -303,7 +303,31 @@ bool _setupAP() {
 
 The existing `Serial.println("IP: …")` success line stays as-is: it is out of scope, and promoting a success line to `log_e` would misreport its level (`log_i` is compiled out — see Global Constraints).
 
-- [ ] **Step 2: Add gate A to the `WIFI_AP` case**
+- [ ] **Step 2: Add the task-aware acknowledgement predicate**
+
+Add to `wifi_common.cpp`'s includes, after `#include "core/radio_mem.h"` (`:5`):
+
+```cpp
+#include "core/serialcmds.h"
+```
+
+Then, after the file-scope statics at `:16-17` (`timezoneTaskHandle`, `wifiTransitioning`):
+
+```cpp
+// A red banner may wait for an acknowledgement only when a human is at the device.
+// displayError's waitKeyPress spins on check(AnyKeyPress) (display.cpp:322); reached
+// from the serial task that holds the CLI with no BLE dismissal AND no HTTP rescue,
+// because the WebUI `/cm nav esc` needs is the very thing these gates refuse to start.
+// taskInputHandler clearing button globals every 75ms (main.cpp:84-111) can erase the
+// press that would release it, and a dimmed screen swallows the first one anyway.
+static bool errorMayWaitForKey() { return xTaskGetCurrentTaskHandle() != serialcmdsTaskHandle; }
+```
+
+`xTaskGetCurrentTaskHandle()` arrives via Arduino.h's FreeRTOS headers; `serialcmdsTaskHandle` is declared `extern` at `serialcmds.h:6` and defined at `serialcmds.cpp:14`.
+
+**This predicate ships UNVERIFIED at runtime.** The comparison is standard FreeRTOS, but nothing on the bench has induced either gate, and Task 6's `js` recipe is not expected to. Do not claim it works; claim it compiles and reads correctly.
+
+- [ ] **Step 3: Add gate A to the `WIFI_AP` case**
 
 Replace `wifi_common.cpp:182-185` with:
 
@@ -318,7 +342,7 @@ Replace `wifi_common.cpp:182-185` with:
                     (unsigned)radioLargestDmaBlock(),
                     (unsigned)RADIO_WIFI_MIN_DMA_BLOCK
                 );
-                displayError("Low RAM: free BLE/SD first", false);
+                displayError("Low RAM: free BLE/SD first", errorMayWaitForKey());
                 return false;
             }
             WiFi.mode(WIFI_AP);
@@ -326,24 +350,20 @@ Replace `wifi_common.cpp:182-185` with:
             break;
 ```
 
-`displayError(..., false)`, not `true` — see Global Constraints.
-
-- [ ] **Step 3: Stop the STA gate wedging the serial task**
+- [ ] **Step 4: Give the STA gate the same predicate**
 
 At `wifi_common.cpp:189-192` change the one argument:
 
 ```cpp
             if (!radioHasMemForWifi()) {
-                // false, not true: `webui -noAp` reaches this from the serial task,
-                // where waitKeyPress holds the CLI with no BLE dismissal available.
-                displayError("Low RAM: free BLE/SD first", false);
+                displayError("Low RAM: free BLE/SD first", errorMayWaitForKey());
                 return false;
             }
 ```
 
-**This is a deliberate one-argument widening beyond the spec, and a reviewer may reject it.** Rationale: `startWebUi` calls `wifiConnectMenu(WIFI_STA)` at `webInterface.cpp:756`, so `webui -noAp` can already reach a blocking `displayError` from the serial task — the exact defect the spec forbids in new code, on a path RC3 owns. Cost: an on-device operator no longer gets a "press any key" acknowledgement on this banner. If rejected, revert this step only; Tasks 3–7 are unaffected.
+Why this pre-existing line is in scope: `startWebUi` calls `wifiConnectMenu(WIFI_STA)` at `webInterface.cpp:756`, so `webui -noAp` already reaches a blocking `displayError` from the serial task — a wedge with no remote recovery, on a path RC3 owns. The predicate keeps the on-device operator's acknowledgement, which a blunt `false` would have cost them (`displayError` returns after `delay(200)`, and the menu repaints over the banner too fast to read).
 
-- [ ] **Step 4: Build**
+- [ ] **Step 5: Build**
 
 ```sh
 pio run -e smoochiee-board 2>&1 | tail -20
@@ -356,7 +376,7 @@ Three callers change behaviour; none needs editing:
 - `wifi_commands.cpp:37` (`return _setupAP();`) — `wifi on`'s AP fallback result becomes truthful; it claimed success unconditionally before.
 - `attack_commands.cpp:174` — still discards the return. Out of scope, recorded in the spec.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```sh
 git add src/core/wifi/wifi_common.cpp
@@ -369,8 +389,11 @@ defect verbatim, one module along. And wifiConnectMenu's WIFI_AP case had no
 memory gate at all, while all three radioHasMemForWifi() sites guarded STA
 paths; `webui` defaults to AP, so the mode the verb actually uses was ungated.
 
-The STA gate's displayError also waited on a key press, which holds the serial
-task with no BLE dismissal available whenever `webui -noAp` reaches it.
+Both gates' red banner now waits for a key press only when a human is at the
+device. Reached from the serial task it waited forever for a press nobody was
+there to make: BLE parses nothing while that task is held, and the HTTP rescue
+needs the WebUI these gates just refused to start, so the device wedged with no
+remote recovery at all. `webui -noAp` reaches the STA gate that way today.
 EOF
 ```
 
@@ -913,4 +936,4 @@ git fetch -q origin && git rev-list --count origin/main..HEAD   # expect 0
 1. The enum has **four** values, not five. The spec implied separate slugs for gate A and gate B; `startWebUi` cannot tell them apart from a bare `bool`, so reporting either would be a guess. One `wifi_bringup_failed` slug, with each gate logging its own reason.
 2. The success line uses **`RAM_LOGF`**, not `log_e`. The spec's sink table lists `log_e` for all outcomes; using an ERROR level for a success is a misreport, and `log_i` is compiled out. `RAM_LOGF` reaches the same console via the UART0 mirror.
 
-One step widens scope by one argument — Task 2 Step 3, `displayError`'s `true` → `false` on the pre-existing STA gate — and is marked as independently revertable.
+**One deliberate widening beyond the spec**, decided by the user on 2026-07-31 after the risk was laid out: Task 2 Steps 2 and 4 make the low-RAM banner's key-press wait conditional on `xTaskGetCurrentTaskHandle() != serialcmdsTaskHandle`, covering the *pre-existing* STA gate as well as the new AP one. The plan originally proposed a blunt `displayError(..., false)`; that removed a remote wedge but cost the on-device operator a ~200 ms unreadable banner. The predicate removes the tradeoff. It ships **UNVERIFIED at runtime** — neither gate has been induced on hardware, and Task 6 is not expected to induce them.
