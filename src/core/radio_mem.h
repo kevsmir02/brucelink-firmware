@@ -45,7 +45,11 @@ static inline bool radioHasMemForBle() {
     }
     
     // Not enough DMA memory - try to free WiFi
-    Serial.println("[RAM] Low contiguous DMA memory for BLE, attempting to free WiFi...");
+    // log_e, not Serial: `Serial` here is the native USB-CDC port while the bench
+    // reads the UART bridge (see ram_profile.cpp), so these three lines were
+    // unobservable by construction. That is why ISSUE-19's AP-teardown attribution
+    // is stuck at SUSPECTED — the missing log line was never evidence either way.
+    log_e("[RAM] Low contiguous DMA memory for BLE, attempting to free WiFi...");
     
     // Disconnect WiFi if active
     if (WiFi.getMode() != WIFI_MODE_NULL || wifiConnected) {
@@ -59,13 +63,16 @@ static inline bool radioHasMemForBle() {
     
     // Recheck after freeing WiFi
     if (radioLargestDmaBlock() >= RADIO_BLE_MIN_DMA_BLOCK) {
-        Serial.printf("[RAM] WiFi freed, DMA block: %d bytes\n", radioLargestDmaBlock());
+        log_e("[RAM] WiFi freed, DMA block: %u bytes", (unsigned)radioLargestDmaBlock());
         return true;
     }
     
     // Still not enough - return false, caller shows error
-    Serial.printf("[RAM] Still only %d bytes DMA block, minimum %d needed\n", 
-                  radioLargestDmaBlock(), RADIO_BLE_MIN_DMA_BLOCK);
+    log_e(
+        "[RAM] Still only %u bytes DMA block, minimum %u needed",
+        (unsigned)radioLargestDmaBlock(),
+        (unsigned)RADIO_BLE_MIN_DMA_BLOCK
+    );
     return false;
 }
 
