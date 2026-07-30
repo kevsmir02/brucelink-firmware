@@ -2610,6 +2610,88 @@ rather than being its own defect.
 
 ---
 
+### ISSUE-38 — `reverseshell` corrupts the heap and reboots on every clean exit
+
+**Status:** OPEN · **Severity:** **high** (guaranteed crash; it is the verb's *only* exit
+path) · **Verified** on hardware 2026-07-30 · **Root cause established, backtrace
+ELF-matched**
+
+The verb now works — see below — but **ending it always crashes the device.** The operator
+pressed the documented LEFT+RIGHT Esc chord and the device rebooted. Console:
+
+```
+CORRUPT HEAP: Bad head at 0x3fcd7594. Expected 0xabba1234 got 0x00000002
+assert failed: multi_heap_free multi_heap_poisoning.c:279 (head != NULL)
+ELF file SHA256: 411d7e151          <- matches the local ELF, decode is trustworthy
+rst:0xc (RTC_SW_CPU_RST)
+```
+
+Decoded, the chain is unambiguous:
+
+```
+_serialCmdsTaskLoop → SerialCli::parse → reverseshellCmdCallback (attack_commands.cpp:249)
+  → ReverseShell() at reverseShell.cpp:211        <- function returning, locals destroyed
+    → AsyncWebServer::~AsyncWebServer() (WebServer.cpp:61) → reset() (:202)
+      → list<unique_ptr<AsyncWebHandler>>::clear() → default_delete
+        → operator delete(void*)                  <- on a STACK address
+```
+
+**Root cause: a stack object is handed to a container that owns it.**
+
+- `AsyncWebSocket ws("/ws");` is a **function-local** at `reverseShell.cpp:13`.
+- `webServer.addHandler(&ws)` at `:107` passes its address to
+  `AsyncWebServer::addHandler`, which does `_handlers.emplace_back(handler)` into a
+  `std::list<std::unique_ptr<AsyncWebHandler>>` (`WebServer.cpp:96-99`) — **unconditional
+  ownership**, plain `default_delete`, no `_freeOnRemoval` consultation.
+- So `~AsyncWebServer()` calls `delete` on memory that was never `new`ed.
+
+**It is also a use-after-destruction.** `ws` is declared *after* `webServer` (`:13` vs
+`:12`), so reverse-declaration-order destruction destroys `ws` **first**, and the server
+then deletes the already-destructed object.
+
+This fires on **every** exit from the loop's `break` (`:200-207`), so there is no
+non-crashing way to end the verb. It is a **different class from ISSUE-1** — heap
+corruption from bogus ownership, not the SPI-bus mutex assert — and it is not load- or
+timing-dependent.
+
+**Contrast that proves the pattern:** the Evil Portal does the same call correctly —
+`_captiveHandler = new CaptiveRequestHandler(this); webServer.addHandler(_captiveHandler);`
+(`evil_portal.cpp:296-297`) — heap-allocated, so its teardown is safe. That is why the
+portal does not crash on `evilportal -off`.
+
+**Fix direction:** heap-allocate the websocket and let the server own it, matching the
+portal — `auto *ws = new AsyncWebSocket("/ws"); webServer.addHandler(ws);` — and do not
+delete it by hand. Do **not** simply reorder the declarations; that fixes the
+use-after-destruction but leaves `delete` being called on a stack address.
+
+**What does work, verified the same run** (clean boot, free 81,099 / dma 31,732):
+
+| Check | Result |
+|---|---|
+| AP `BruceShell` on air | **yes** — WPA2, ch 1, independent `nmcli` scan |
+| DHCP lease | **192.168.4.2/24** (gateway hardcoded `192.168.4.1`, `reverseShell.cpp:15` — *not* the config value) |
+| Web UI, port 80 | **200, 3,459 bytes** |
+| TCP listener, port 23 | accepts, sends all three banner lines |
+| `/ws` → target relay | target received `whoami-probe` |
+| target → `/ws` relay | `relay-proof-8421` returned verbatim |
+
+So the WPA2 passphrase fix is proven: the AP that could never start on any prior build now
+starts, and the relay works both directions.
+
+**Read the architecture before testing it — the device is the C2, not the shell.** Port 23
+is where the *target* dials in; the *operator* drives it from the browser WebSocket at
+`/ws` (`reverseShell.cpp:13`). `WS_EVT_DATA` (`:34-56`) pushes the command to `tcpClient`
+and reads its output back with a 3 s budget, breaking early only on a prompt ending
+`"\n> "`, `"\n$ "` or `"\n# "` (`:48`). Connecting to port 23 and typing gets no response,
+because nothing reads the operator side there — that is by design, not a defect.
+
+**No remote rescue exists.** `reverseshell` binds port 80 itself, so the Bruce WebUI and
+its `POST /cm cmnd=nav esc` are gone for the verb's whole life. Another instance of
+ISSUE-19's radio-verb rule — and with ISSUE-38 the on-device chord does not work either,
+so today the verb has **no clean exit at all**.
+
+---
+
 ## Not tested, and why
 
 Recorded so the gap is visible rather than implied. Session of 2026-07-29, unattended.
