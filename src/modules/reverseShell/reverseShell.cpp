@@ -220,13 +220,26 @@ bool ReverseShell() {
         if (check(EscPress)) {
             tft.println("Exiting reverse shell server...");
             tcpServer.stop();
-            ws->closeAll();
-            webServer.end();
-            dnsServer.stop();
             // The exit stopped every server but never brought the radio down, so
             // BruceShell kept broadcasting WPA2 after the operator ended the attack and
             // ~63 KB stayed held — the device looked idle and was not (ISSUE-39).
+            //
+            // Spacing matters and the first attempt at this rebooted the device on the
+            // press. closeAll() only *queues* close frames for the AsyncTCP task, so
+            // tearing the netif down in the same breath pulls lwIP out from under work
+            // still in flight. reset() then deletes the WebSocket here, while lwIP is
+            // still up, rather than leaving it to ~AsyncWebServer() after WIFI_OFF.
+            // Delays match EvilPortal::shutdown(), the one teardown proven on this board.
+            ws->closeAll();
+            vTaskDelay(200 / portTICK_PERIOD_MS);
+            webServer.end();
+            vTaskDelay(200 / portTICK_PERIOD_MS);
+            webServer.reset();
+            vTaskDelay(100 / portTICK_PERIOD_MS);
+            dnsServer.stop();
+            vTaskDelay(100 / portTICK_PERIOD_MS);
             wifiDisconnect();
+            vTaskDelay(100 / portTICK_PERIOD_MS);
             break;
         }
         delay(10);

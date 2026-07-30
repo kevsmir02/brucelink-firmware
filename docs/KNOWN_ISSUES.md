@@ -2552,13 +2552,27 @@ and holds ~63 KB) · **Verified** on hardware 2026-07-30
 > armed. `wifiDisconnect()` (`wifi_common.cpp:152-164`) does `softAPdisconnect(true)` +
 > `disconnect(true, true)` + `WIFI_OFF`, which is the outcome this entry asked for.
 >
-> ⚠️ **NOT yet verified on hardware, and it cannot be verified remotely.** The verb blocks
-> the serial task *and* binds port 80, so neither BLE nor `/cm nav esc` can reach it; the
-> only exit is the on-device **LEFT+RIGHT** chord. Verification needs an operator at the
-> board: dispatch `reverseshell`, confirm `BruceShell` on air, press the chord, then check
-> the AP is gone from an independent `nmcli` scan **and** that `free` returns to its ~81 K
-> boot plateau rather than the ~18 K this entry recorded. Until that is done this is a
-> **code-verified fix only**.
+> ⚠️ **NOT verified on hardware — two attempts were made and both were defeated by
+> ISSUE-41, not by this fix.** The verb blocks the serial task *and* binds port 80, so
+> neither BLE nor `/cm nav esc` can reach it; the only exit is the on-device
+> **LEFT+RIGHT** chord. Both operator attempts ended in a reboot, and the captured
+> backtrace put the fault on the **main loop task** inside `loopOptions()` — the presses
+> were driving the main menu, not `reverseshell`'s Esc check. This is
+> **a code-verified fix only.**
+>
+> **Two things were learned that the next attempt needs.** The chord is *racy* while a
+> verb blocks the serial task, because the main loop is still consuming button presses
+> (ISSUE-41); and on a dimmed screen the first press is swallowed by `wakeUpScreen()`,
+> so it takes two. ISSUE-41 is now fixed, which removes the reboot but **not** the race.
+>
+> **The ordering in this fix was itself corrected once.** The first version called
+> `wifiDisconnect()` with no delays, immediately after `ws->closeAll()` — which only
+> *queues* close frames for the AsyncTCP task — and left `~AsyncWebServer()` to delete the
+> WebSocket after `WIFI_OFF`. It now spaces the steps and calls `webServer.reset()` while
+> lwIP is still up, matching `EvilPortal::shutdown()` (`evil_portal.cpp:400-410`), the only
+> teardown proven on this board. **No evidence was ever produced that the first version
+> crashed** — it was assumed to be the cause of the first reboot before the backtrace
+> existed, and the backtrace later pointed at ISSUE-41 instead.
 
 Exposed the moment ISSUE-38 stopped crashing: nothing had ever survived the exit long
 enough to see what it left behind.
@@ -2656,6 +2670,75 @@ only trigger** (`_pendingWifiRestart` is set nowhere else — `evil_portal.cpp:2
 at `:316-318` and `:409-411`). So "unbounded growth" remains **inferred from the library
 source, not observed**; what is now measured is that one rename costs ~2.8 KB before the
 fix and ~0.2 KB after.
+
+---
+
+### ISSUE-41 — `loopOptions()` reads a freed label after the handler returns, panicking the main loop
+
+**Status:** **RESOLVED 2026-07-30 in `display.cpp`** — label copied before the call ·
+**Severity:** was critical (crashes the main menu, the most-used path on the device) ·
+**Verified** on hardware, ELF `2efaeec784a5768a` · **Reproduced 2/2, then 0/1 after the fix**
+
+**A fork-introduced regression.** The `log_e("Returned from: %s", …)` line did not exist
+upstream; it was added by this fork to give ISSUE-30 something to go on, and it reads a
+label that the handler it just called may have destroyed.
+
+`options` is the **global** at `include/globals.h:176`, and `loopOptions()` takes it
+**by reference**. Many handlers rebuild that global — `evil_portal.cpp:71-73`, `:92-97`,
+`:102-109` all do `options = {…}`. So the sequence was:
+
+```cpp
+log_e("%sSelected: %s", …, options[chosen].label.c_str());  // safe — before the call
+options[chosen].operation();                                // handler reassigns `options`
+log_e("Returned from: %s", options[chosen].label.c_str());  // reads a destroyed String
+```
+
+**Decoded backtrace**, innermost last. `ELF file SHA256: a4bc5d735` matches the flashed
+`a4bc5d735f793762`, so this decode is authoritative:
+
+```
+Guru Meditation Error: Core 1 panic'ed (LoadProhibited)
+EXCVADDR: 0x00000000   A2: 0x00000000        <- NULL %s
+
+vPortTaskWrapper                        port.c:139
+loopTask                                main.cpp:82
+MainMenu::begin / loop()                main_menu.cpp:69, main.cpp:626
+loopOptions                             display.cpp:754   <- "Returned from: %s"
+__wrap_log_printf                       esp_diagnostics_log_hook.c:418
+vsnprintf / _vsnprintf_r / _svfprintf_r newlib
+??                                      ROM                <- null deref
+```
+
+**It crashed the device twice during the ISSUE-39 operator test** and was initially
+mis-attributed to that session's `wifiDisconnect()` change. The backtrace refuted that:
+the fault is on the **main loop task**, not the serial task, and has nothing to do with
+the radio teardown. *Recorded because the wrong attribution was stated out loud before
+the evidence existed.*
+
+**Fix:** copy the label into a local before invoking the handler, and log the copy.
+
+**Verified without an operator**, which is worth reusing — the `options <n>` verb sets
+`forceMenuOption` (`util_commands.cpp:323`), so the whole crash path is drivable over BLE:
+
+| step | result |
+|---|---|
+| `options 0` → force-select "WiFi" | `Forcely Selected: WiFi` |
+| `optionsJSON` | now returns the **WiFi submenu**, 20 entries — proves the global was rebuilt under the live reference |
+| `options 19` → force-select "Main Menu" | `Returned from: Main Menu`, then **`Returned from: WiFi`** — the exact instruction that panicked |
+| uptime across the whole sequence | **00:00:51 → 00:02:15, continuous — no reset** |
+
+⚠️ **Consequence for every operator test in this register.** While a blocking verb holds
+the serial task, the **main loop keeps running the menu UI**, so physical button presses
+drive *both* it and the blocked verb's own `check()`. During the ISSUE-39 test the
+operator's LEFT+RIGHT went to the main menu — `loopOptions(): Selected: WiFi` is in the
+console — rather than to `reverseshell`'s Esc check. This is ISSUE-19's race one module
+along, and it means **an on-device chord is not a reliable way to exit a blocking verb.**
+
+**Second trap found the same way:** `InputHandler()` swallows the first press whenever the
+screen has dimmed — `if (!wakeUpScreen()) AnyKeyPress = true; else return;`
+(`boards/smoochiee-board/interface.cpp:119-123`, `display.cpp:114-129`). `EscPress` is
+never set on that press. **Any instruction that says "press LEFT+RIGHT to exit" is
+incomplete: on a dimmed screen it takes two.**
 
 ---
 

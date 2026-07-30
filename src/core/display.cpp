@@ -749,9 +749,15 @@ int loopOptions(
             // and CORE_DEBUG_LEVEL=1 compiles out every level below ERROR. This is the
             // one line that identifies which entry the main loop entered, so when the
             // loop wedges (ISSUE-30) it is the only evidence of where it went.
-            log_e("%sSelected: %s", forced ? "Forcely " : "", options[chosen].label.c_str());
+            // Copied before the call, not read after it: `options` is the global at
+            // globals.h:176 and this holds it by reference, so a handler that rebuilds
+            // it — evil_portal.cpp:71-73 and many others do — destroys every Option
+            // including this label. Reading it back on return dereferenced a freed
+            // String and panicked the main loop task (LoadProhibited, EXCVADDR 0).
+            String chosenLabel = options[chosen].label;
+            log_e("%sSelected: %s", forced ? "Forcely " : "", chosenLabel.c_str());
             options[chosen].operation();
-            log_e("Returned from: %s", options[chosen].label.c_str());
+            log_e("Returned from: %s", chosenLabel.c_str());
             break;
         }
         // interpreter_start -> running the interpreter

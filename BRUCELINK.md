@@ -278,6 +278,15 @@ with `-DRF_DEBUG=1` if you want them.
   same status bar the main loop repaints on its 30 s timer. **Therefore an idle test
   proves nothing**, and every "survivor" in the seven-verb sweep was tested idle for
   90 s. Both backtraces in `docs/KNOWN_ISSUES.md` §ISSUE-1.
+- **An on-device chord is not a reliable way to exit a blocking verb.** The main loop keeps
+  running the menu UI while a verb holds the serial task, so a physical press drives *both*
+  it and the verb's own `check()` — during the ISSUE-39 test the operator's LEFT+RIGHT was
+  consumed by the main menu (`loopOptions(): Selected: WiFi` in the console) instead of
+  `reverseshell`. Same race as ISSUE-19, one module along.
+- **On a dimmed screen the first button press is swallowed.** `InputHandler()` returns early
+  when `wakeUpScreen()` reports it woke the display (`interface.cpp:119-123`), so `EscPress`
+  is never set. Any "press LEFT+RIGHT to exit" instruction needs **two** presses. This has
+  probably been misread as "the verb ignored Esc" more than once.
 - **A blocking verb cannot be rescued over BLE**, only over HTTP `/cm nav esc`. And
   the dismissal key differs per verb: `ap_info` exits on **SELECT only** and ignores
   Esc; menu verbs take Esc or a "Main Menu" entry; `evilportal` takes Esc *then*
