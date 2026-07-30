@@ -394,7 +394,7 @@ needs both answers, so they are now separate columns.
 | `webui -bg` | no | immediately | — | starts the WebUI and returns instead of holding the screen. Returned in 357 ms, 2026-07-29. Still prints "Press ESC to quit" — stale text, it does return |
 | `blespam <type> <count>` | no | **after the burst** | `state`, `ble_progress`, `ble_result` — but see below | self-completing, verified 5/5. `fastpair_*` fixed in `c9c43c03` (§5.1). Suspends the BLE link for **0.5–11.9 s** (measured); tolerate ~12 s. Types in §5.1; count < 1 → 10 |
 | `evilportal <ssid> <ch> [template]` | **YES** | **only after dismissal** | ⚠️ `state: portal` only | The **blocking** form. defaults: ssid `Free Wifi`, ch `6`. **CRASHES UNDER LOAD** — same `xTaskPriorityDisinherit` assert as `deauth`, ELF-matched backtrace, ~11 min with a client associated (KNOWN_ISSUES §ISSUE-1); unchanged by the headless work. Also commits DNS/HTTP state even when the AP failed to start (§ISSUE-28). Do **not** ship as a one-tap action — **use `-bg`** |
-| `evilportal -bg [-duration <sec>]` | **no** — returns immediately | `-off`, or the duration cap | `state`, `ble_progress`-style portal frames | **Headless, and the one menu-dispatcher verb that is safe to ship.** `uptime` over BLE answered in 0.06 s during a live portal; cap self-stopped at +45.6 s. Cap default **600 s**, `0` = unlimited, malformed values rejected. Serving the page still needs `ble api off` (§ISSUE-21) |
+| `evilportal -bg [-duration <sec>]` | **no** — returns immediately | `-off`, or the duration cap | `state`, `ble_progress`-style portal frames | **Headless, and the one menu-dispatcher verb that is safe to ship.** `uptime` over BLE answered in 0.06 s during a live portal; cap self-stopped at +45.6 s. Cap default **600 s**, `0` = unlimited, malformed values rejected. **Serves the full page with BLE armed** since ELF `e81b0c28f80e70dd` — 8/8 loads, all 4,726 bytes, form included (§ISSUE-21 resolved) |
 | `evilportal -off` / `-status` | no | — | — | `-off` returns `no background portal running` when idle rather than a false success |
 | `deauth [<target>]` | ☠️ **CRASHES THE DEVICE** | never — it panics | — | see below and KNOWN_ISSUES §ISSUE-1. `target` is parsed but ignored (`attack_commands.cpp:152`) |
 | `karma` | **YES** | only after dismissal | — | opens the TFT menu. Tested 2026-07-29: blocks, no crash in 90 s |
@@ -538,10 +538,15 @@ without the operator walking to the device. That is what makes the BLE-off
 configuration — the only one with enough heap to actually serve the page — recoverable.
 Never set `-duration 0` in that configuration.
 
-**Still constrained by memory.** With the BLE API armed the portal starts (16,915 free
-/ 8,180 dma) but `GET /` delivers only ~2,766 of 4,726 bytes before stalling, and the
-credential fields live in the last ~600 bytes. Serving the page still requires
-`ble api off` (KNOWN_ISSUES §ISSUE-21).
+**No longer blocked by memory — corrected 2026-07-30.** This section previously said the
+portal could only serve its page with `ble api off`, because with BLE armed `GET /`
+delivered a partial body and stalled. The cause was one oversized `write()` losing the
+fourth TCP segment, and it is fixed: on ELF `e81b0c28f80e70dd` the portal served **8/8
+full 4,726-byte pages with the BLE API armed**, byte-identical, 0.134–0.376 s each, the
+`email`/`password` fields included. See KNOWN_ISSUES §ISSUE-21 §Root cause.
+
+The margin is still thin — the portal leaves ~16 KB free and `minEver` reaches ~1,864
+under load — so this is "works reliably", not "has headroom".
 
 ---
 

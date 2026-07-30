@@ -39,7 +39,7 @@ Verified end-to-end on hardware, safe to expose as a one-tap action.
 | Capability | Evidence |
 |---|---|
 | **Evil Portal (BLE off)** | Serves the page, answers Android `/generate_204` and iOS `/hotspot-detect.html`, captures credentials, returns them at `/creds`. Verified 2026-07-29. |
-| **Evil Portal headless — `evilportal -bg`** | The verb no longer holds the serial task: `uptime` over BLE answered in **0.06 s** during a live portal, `-status` answered 9× during one. Duration cap self-stopped at **+45.6 s** on a 45 s cap, with **zero** stray bytes on the CLI characteristic. AP confirmed on air by an independent `nmcli` scan. ELF `76d42c72f2b4a8a4`, 2026-07-30. **Serving the page still needs `ble api off`** (ISSUE-21). |
+| **Evil Portal headless — `evilportal -bg`** | The verb no longer holds the serial task: `uptime` over BLE answered in **0.06 s** during a live portal, `-status` answered 9× during one. Duration cap self-stopped at **+45.6 s** on a 45 s cap, with **zero** stray bytes on the CLI characteristic. AP confirmed on air by an independent `nmcli` scan. ELF `76d42c72f2b4a8a4`, 2026-07-30. **Serves the full page with the BLE API armed as of ELF `e81b0c28f80e70dd`** — 8/8 loads returned all 4,726 bytes, byte-identical, 0.134–0.376 s, form included. The old "needs `ble api off`" restriction is **lifted** (ISSUE-21 resolved). |
 | `evilportal -off` / `-status` | `-off` with nothing running returns `no background portal running`, not a false success (`4c4378a1`). |
 | `evilportal -duration` validation | `-duration -5` and `-duration abc` are both rejected and start no portal. Before `4c4378a1` both mapped to `0` = unlimited, disarming the only recovery path that survives `ble api off`. |
 | `blespam apple` | iPhone showed "Setup New iPhone". Company ID 76 captured. |
@@ -73,7 +73,7 @@ Verified end-to-end on hardware, safe to expose as a one-tap action.
 | Serial CLI over USB | **Does not exist on this board.** BLE is the only command interface | ISSUE-22 |
 | `evilportal` (blocking) — **leaks its AP** | Exiting without completing "Exit Portal" leaves the AP, DNS and web server **running and serving** (200 in 11 ms). Hardware-confirmed 2026-07-30. Destructor fix landed in `411d7e151dbc2356` but is **unverified** | ISSUE-31 |
 | `reverseshell` — **leaks its AP on exit** | The verb now works end to end and exits cleanly (`cedad77f` closed the heap-corruption reboot, ISSUE-38). But the exit path never brings the radio down, so `BruceShell` keeps broadcasting WPA2 after the operator ends the attack, holding ~63 KB. Two scans plus a successful association confirmed it 2026-07-30 | ISSUE-39 |
-| HTTP **bodies** with BLE armed | Small replies work; a real page body does not. TCP 80 accepts, `GET /` returns 0 bytes. **Corrected 2026-07-30** — this row previously read "both transports cannot coexist", which is wrong: BLE + AP + WebUI ran together and served `POST /login` and `POST /cm` fine | ISSUE-16, ISSUE-21 |
+| HTTP **bodies** with BLE armed | **Corrected twice.** This row first read "both transports cannot coexist" (wrong: BLE + AP + WebUI ran together and served `POST /login` and `POST /cm` fine), then "a real page body does not work" (also wrong). The portal's 4,726-byte page now serves 8/8 with BLE armed on ELF `e81b0c28f80e70dd`. What failed was one oversized `write()` losing the fourth TCP segment, not page bodies as a class — see ISSUE-21 §Root cause | ISSUE-16, ISSUE-21 |
 | `js` output/errors | Interpreter runs, but no return channel at all | ISSUE-15 |
 | `rf rx`, `md5`/`stat` on a missing file | Silent failure, empty reply | ISSUE-13 §context |
 | `rf selftest`, `nrf24`, `gps`, `getscreen` | Not registered in this build | — |
@@ -122,9 +122,10 @@ The honest gap. See §"Not tested, and why" in KNOWN_ISSUES.md for the full tabl
 
 - **`/upload`, `/edit`, `/rename`, WS `/ws`** — the write-side HTTP routes and the
   WebSocket. The read-side routes are all verified; these were not exercised.
-- ~~**Evil Portal with `ble api off`**~~ — **DONE 2026-07-29.** It was the memory
-  ceiling: the whole flow works in the BLE-off configuration, credential capture
-  included (ISSUE-21). Not re-run since the headless verb landed.
+- ~~**Evil Portal with `ble api off`**~~ — **DONE 2026-07-29.** The whole flow works in
+  the BLE-off configuration, credential capture included. The "memory ceiling" reading
+  was wrong; the page now serves with BLE **armed** too (ISSUE-21 resolved 2026-07-30).
+  Credential capture has **not** been re-run since the headless verb landed.
 - ~~**ISSUE-24's fix (`d71f19e9`) on hardware**~~ — **DONE 2026-07-30, 5th attempt.**
   Verified with `POST /cm cmnd=blespam apple 10`, not `evilportal`: the portal verb is
   structurally unable to test this, because exiting it requires the very button

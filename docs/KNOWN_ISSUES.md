@@ -1452,8 +1452,15 @@ remains **untested**.
 
 ### ISSUE-21 — Evil Portal cannot serve its own page on this board
 
-**Status:** RESOLVED 2026-07-29 — it was the memory ceiling, not a portal defect · **Severity:** high (the attack is inert — no victim ever sees a
-form) · **Verified** 2026-07-29 · **Two clients, 7 failed fetches**
+**Status:** **RESOLVED 2026-07-30 in `evil_portal.{h,cpp}`** — the response died on the
+fourth TCP segment and dropped exactly the login form; fixed by streaming the page from
+`.rodata`. **Verified 8/8 on hardware**, ELF `e81b0c28f80e70dd` · **Severity:** was high
+(the attack was inert — no victim ever saw a form)
+
+> This entry was twice resolved on a wrong reading before the real cause was found —
+> first as "the memory ceiling, not a portal defect" (2026-07-29), then quantified as
+> "~13 KB per load, no second load" (2026-07-30). Both are left in place below, marked,
+> because the corrections are the useful part. Read §Root cause for what is actually true.
 
 The portal starts, advertises, and hands out DHCP leases, but does not serve a usable
 page. The AP works; the HTTP responder does not.
@@ -1600,11 +1607,15 @@ Measured against a background portal with the BLE API armed (start:
 | `/hotspot-detect.html` after | `http=000` in **0.196 s** — now refused outright, not stalled |
 | heap after | **free 4,287 / dma largest 884** |
 
-**Serving the portal page exactly once costs ~13 KB and leaves the portal unable to serve
-anything again.** The first load succeeds cleanly; there is no second load. Note the two
-distinct failure shapes in one sequence — the stalls on `/` (connection accepted, body
-never allocated) and then the fast refusal on a small route (server no longer accepting) —
-which is the boundary this register warns against conflating.
+**⚠️ The conclusion drawn here — "serving the portal page exactly once costs ~13 KB and
+leaves the portal unable to serve anything again" — is WRONG, and was refuted on hardware
+2026-07-30. See §Root cause below.** The reading was taken only *after* four further failed
+requests, so three stalled connections were being charged to the page load. Sampled
+immediately after a single `GET /`, the cost is fully returned. The measurements in the
+table above stand; the inference from them does not. Note the two distinct failure shapes
+in one sequence — the stalls on `/` (connection accepted, body never allocated) and then
+the fast refusal on a small route (server no longer accepting) — which is the boundary this
+register warns against conflating.
 
 **This is what real handsets hit.** During the ISSUE-27 test both an iPhone and an Android
 auto-opened the portal and then showed a blank/failed page: the platform's own probe
@@ -1636,9 +1647,94 @@ artifact. **Operational consequence: after any portal cycle the largest DMA bloc
 costs ~36 KB and takes 3.09 s, the 3,000 ms `yield()` wait at `evil_portal.cpp:170`
 dominating (3088/3086/3088/3151 ms across runs).
 
-**Fix direction:** the page is built as a `String` and copied into the response; reducing
-the number of live copies of a ~4.7 KB body, or streaming it with a chunked response
-instead of `send(200, "text/html", String)`, is where the 13 KB is. Not attempted here.
+---
+
+**RESOLVED 2026-07-30 — root cause found, fixed, and verified 8/8 on hardware.**
+Fixed in `evil_portal.{h,cpp}`; proven on ELF `e81b0c28f80e70dd`, device
+`1C:DB:D4:5E:D7:39`.
+
+**Two claims this entry carried are refuted.**
+
+1. *"The cost is ~13 KB retained."* It is **fully transient**. Sampled around one `GET /`
+   with nothing else in flight: `free` 16,307 before → **16,275** immediately after →
+   **16,307** at +10 s → **16,307** at +25 s. The peak is real but returns; it is visible
+   only in `minEver`, which fell to **344 bytes** during the load.
+2. *"There is no second load."* There is. From a pristine boot with a 60 s per-request
+   budget: #1 truncated, #2 fail, #3 fail, **#4 = 200 / 4,726 B in 0.193 s**, #5 fail,
+   **final = 200 / 4,726 B in 0.372 s**. The failure is **per-request nondeterminism**, not
+   a one-shot budget. Two requests from an identical heap state (16,307 free, 8,180 largest)
+   gave opposite outcomes.
+
+**Root cause — the response dies on a TCP segment boundary, and the arithmetic is exact.**
+
+A stalled response stops at **exactly 4,202 body bytes**, observed **four independent
+times** across three runs and two builds. The response headers were captured on the wire
+and are **exactly 106 bytes**:
+
+```
+HTTP/1.1 200 OK\r\nConnection: close\r\nAccept-Ranges: none\r\n
+Content-Length: 4726\r\nContent-Type: text/html\r\n\r\n
+```
+
+`106 + 4,202 = 4,308 = exactly 3 × CONFIG_LWIP_TCP_MSS (1,436)`. **Three TCP segments
+allocate; the fourth never does.** `AsyncBasicResponse` hands lwIP the whole body in a
+single `client()->write()` (`WebResponses.cpp:308`), and lwIP TX pbufs must be internal
+DMA-capable RAM — `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP` is **not set**. There is no
+retry that ever recovers, and **the console prints nothing at all** (two lines across an
+entire run, neither related).
+
+**What the victim actually sees, and why the original 2026-07-29 report was right.**
+The missing tail is **exactly 524 bytes** (4,726 − 4,202), and it is precisely the
+`containersubtitle` plus the entire `<form>`. A captured truncated body ends mid-element
+at `<div class='containertitle'>Sign in`, and `grep -c "name='email'"` returns **0**. That
+is byte-for-byte this entry's original symptom — *"logo area present, both form fields
+absent"*. **The portal was reliably serving everything except the login form.** "Blank
+page" understated it: the page rendered, the form was never delivered.
+
+**The fix** (`evil_portal.h`, `evil_portal.cpp:574,609,679` — 25 insertions, 5 deletions):
+the two built-in pages become function-local `static const char[]` (`.rodata`, literal text
+untouched so the diff stays mergeable), `String htmlPage` becomes
+`const char *_defaultHtml` + `_defaultHtmlLen`, and `portalController()` serves them with
+`beginResponse(200, "text/html", (const uint8_t *)_defaultHtml, _defaultHtmlLen)` →
+`AsyncProgmemResponse`, which writes `min(2872, tcp_win)` per slice and **resumes on the
+next ACK** when the window closes (`WebResponses.cpp:428-437`).
+
+**Static storage was chosen for lifetime, not just cost.** `evilPortalBgStop()` does
+`delete bgPortal` (`evil_portal_bg.cpp:33-35`), `AsyncWebServer::end()` only calls
+`_server.end()` (`WebServer.cpp:116-118`), and `AsyncProgmemResponse::_sourceValid()`
+returns `true` unconditionally. A pointer into a member `String` would therefore have been
+a use-after-free on a response still in flight at portal stop. A literal cannot be.
+
+**⚠️ The fix works, but not for the reason first predicted — and the measurement is what
+caught it.** Removing the body copy was expected to gain ~4.7 KB of internal DRAM at portal
+start. It gained **~0** (17,651 vs 17,607/17,683 before). Cause:
+**`CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096`** with `CONFIG_SPIRAM_USE_MALLOC=y`, so *every
+allocation over 4 KB lands in PSRAM*. Both the 4,736-byte `htmlPage` String and
+`AsyncBasicResponse`'s copy were in PSRAM all along and never competed for internal DRAM.
+**The win comes entirely from the bounded per-write pbuf demand and the ACK-driven retry
+loop**, not from removing a copy. *Any heap argument on this board that ignores the 4 KB
+PSRAM threshold will mis-attribute its cause.*
+
+**Verification — same 8-load harness, same pristine start, same afternoon:**
+
+| build | result |
+|---|---|
+| `f5244eb35dd10795` (before) | **0/8** — #1 truncated at 4,202 B, #2–#8 `http=000` |
+| `e81b0c28f80e70dd` (after) | **8/8 full 4,726 B**, 0.134–0.376 s each |
+
+All eight bodies were **byte-identical** (single md5 `106673d595bbfb149ae056408ecc8bbc`)
+and every one contained `name='email'`, `name='password'` and `</html>`.
+
+**Residual, quantified rather than hidden.** Heap drifts 16,567 → 14,303 across eight
+back-to-back loads (**~283 B per load**), and the post-stop plateau read **51,387**, about
+1.6 KB below the documented 52,231–53,143. **This is not a regression from the fix** — a
+following no-load portal cycle returned it to **53,511**. It is per-load residual held past
+portal stop and reclaimed on the next cycle; earlier builds never completed eight loads, so
+they never accumulated it. Not believed to matter operationally, but it is unexplained.
+
+**Still true after the fix:** the portal leaves only ~16 KB free, so this remains a thin
+margin, and `minEver` still reaches ~1,864 under load. The ceiling was not raised — the
+response simply no longer demands more than the margin can serve at once.
 
 ---
 

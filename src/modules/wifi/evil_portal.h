@@ -72,7 +72,13 @@ private:
 
     String outputFile = "default_creds.csv";
 
-    String htmlPage;
+    // Points into .rodata, never into the heap: the built-in pages are compile-time
+    // literals, and copying one into a String cost 4.7 KB of the ~16 KB the portal
+    // leaves free — enough to starve the fourth TCP segment of the response (ISSUE-21).
+    // Static storage also means a response still in flight cannot outlive its source
+    // when evilPortalBgStop() deletes this object.
+    const char *_defaultHtml = nullptr;
+    size_t _defaultHtmlLen = 0;
     String htmlFileName;
     bool isDefaultHtml = true;
     FS *fsHtmlFile;
