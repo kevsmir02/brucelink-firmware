@@ -777,8 +777,28 @@ bool startWebUi(bool mode_ap, bool background, bool selftest) {
     report.required = RADIO_WIFI_MIN_DMA_BLOCK;
     report.apMode = mode_ap;
 
+    // -selftest forces gate D below, which only exists inside the !server setup
+    // path; against a WebUI that's already up there is nothing left to force.
+    // Checked ahead of the already-serving shortcut just below so it can't be
+    // swallowed by it and reported as a silent `started` for a test that never ran.
+    if (selftest && server) {
+        report.result = WebUiStartResult::SelftestAlreadyServing;
+        report.dmaBlock = radioLargestDmaBlock();
+        report.tcpState = (uint8_t)server->state();
+        reportWebUiStart(report);
+        return false;
+    }
+
     bool keepWifiConnected = false;
-    if (WiFi.status() != WL_CONNECTED) {
+    if (server) {
+        // AP mode's WiFi.status() is never WL_CONNECTED (STA.cpp:251-253 only sets
+        // _status from STA connect events), so without this check, every re-entry
+        // onto an already-serving AP — the on-device "WebUi screen" menu entry, or
+        // a second `webui` — re-ran wifiConnectMenu() and the gates below against
+        // a server that was already listening, reporting wifi_bringup_failed while
+        // the WebUI kept running underneath it.
+        keepWifiConnected = true;
+    } else if (WiFi.status() != WL_CONNECTED) {
         // The return was discarded here, so neither the STA memory gate nor a failed
         // softAP() could reach this caller and the WebUI was built on top of an
         // interface that might not exist.
@@ -786,6 +806,12 @@ bool startWebUi(bool mode_ap, bool background, bool selftest) {
             report.result = WebUiStartResult::WifiBringUpFailed;
             report.dmaBlock = radioLargestDmaBlock();
             reportWebUiStart(report);
+            // _setupAP() can fail after WiFi.mode(WIFI_AP) already ran
+            // (wifi_common.cpp:210), which has already brought up the low-level
+            // driver and enabled the AP interface, holding tens of KB with nothing
+            // to show for it. `webui -off` no-ops here (server and isWebUIActive
+            // are both still unset), so only this unwinds it.
+            if (!keepWifiConnected) wifiDisconnect();
             return false;
         }
     } else {
@@ -836,6 +862,13 @@ bool startWebUi(bool mode_ap, bool background, bool selftest) {
         if (!webUiListening(report.tcpState)) {
             report.result = WebUiStartResult::FailedNotListening;
             report.dmaBlock = radioLargestDmaBlock();
+            // Reported before stopWebUi() frees anything, at the heap minimum
+            // (943 B free / 756 B largest block, ISSUE-12's failing run) rather
+            // than after, when the ~5 KB stopWebUi() would return gives more
+            // margin: the verdict must escape even if the historically-crashy
+            // teardown below panics. Traded deliberately; either order is
+            // defensible, this one favors the report surviving over the report
+            // being cheap.
             reportWebUiStart(report);
             stopWebUi();
             if (!keepWifiConnected) wifiDisconnect();

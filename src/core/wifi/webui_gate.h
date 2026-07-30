@@ -18,6 +18,11 @@ enum class WebUiStartResult : uint8_t {
     WifiBringUpFailed,
     RefusedLowDmaPreAlloc,
     FailedNotListening,
+    // -selftest forces gate D (FailedNotListening), which only exists inside the
+    // !server setup path; against an already-serving WebUI there is nothing left
+    // to force, so this refuses instead of silently reporting Started for a test
+    // that never ran.
+    SelftestAlreadyServing,
 };
 
 struct WebUiStartReport {
@@ -42,6 +47,7 @@ static inline const char *webUiResultSlug(WebUiStartResult r) {
         case WebUiStartResult::WifiBringUpFailed: return "wifi_bringup_failed";
         case WebUiStartResult::RefusedLowDmaPreAlloc: return "low_dma_pre_alloc";
         case WebUiStartResult::FailedNotListening: return "not_listening";
+        case WebUiStartResult::SelftestAlreadyServing: return "selftest_already_serving";
     }
     return "unknown";
 }
