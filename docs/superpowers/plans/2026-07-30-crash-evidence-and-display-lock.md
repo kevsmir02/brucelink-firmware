@@ -534,7 +534,51 @@ git commit -m "docs: record crashlog verified on hardware against a console cont
 
 ---
 
-## Task 4: Revert the unsound in-library semaphore calls
+---
+
+> ## ⚠️ Tasks 4-7 WITHDRAWN 2026-07-30, before any of them ran
+>
+> They rest on a premise this plan got wrong. The spec called the `tftMutex`
+> scheme unsound and said its invariant "holds by luck"; that is **too strong for
+> this codebase**, and reverting it would have deleted evidence-backed work.
+>
+> **The evidence, which lives in `2d9422ea`'s commit message and in no document:**
+> verified on hardware, ELF `5186685c0fdf19c2` — `deauth` ran **21 minutes** with
+> no assert, no backtrace and no reset, across roughly **forty status-bar redraws
+> from the main loop**, which is the exact collision. It had previously died within
+> 20-70 s, twice. ISSUE-1 was left open deliberately, because a negative result
+> against a race is probabilistic rather than proof.
+>
+> **The 32-vs-57 imbalance is real but inert.** Every unmatched give lands on
+> recursion count 0, where FreeRTOS `xQueueGiveMutexRecursive` returns `pdFAIL`
+> and does nothing. The harmful case needs an unmatched give while an outer
+> transaction holds count 1, and that nesting does not occur here — verified:
+> **zero** `startWrite()`/`endWrite()` call sites in `src/` and `boards/`;
+> `TFT_eSprite` unused in `src/` so `lockTransaction` is always false
+> (`Sprite.cpp:42` is its only true-setter); and the sole internal caller of a
+> comment-out composite is `drawString` (5 x `drawRect` at `:5781-5793`), which
+> holds no transaction anywhere in `:5584-5810`. It is a **latent trap** for future
+> code, live the moment anyone adds `startWrite()` to `src/` — not a present defect.
+>
+> **Also corrected:** `tftMutex` is not fork work. It originates in **upstream**
+> `517cec01` as a call-scoped mutex; `2d9422ea` re-scoped it to the transaction and
+> extended it to the two pairs upstream left unprotected.
+>
+> **And ISSUE-30's mutex hypothesis is weaker than the spec claimed.** The
+> imbalance runs in the safe direction — more gives than takes, so it cannot leak —
+> and no take-without-give path was found. It stays a candidate, not the mechanism.
+>
+> **Why not build the outer lock anyway:** the library already serialises at
+> *transaction* granularity, which is why the main loop got ~40 successful redraws
+> during a 21-minute `deauth`. A coarse lock around whole verbs would make the main
+> loop skip repaints for a verb's entire life — a regression against a working
+> interleave.
+>
+> **Replaced by:** Task 9 (docs), which is now the real deliverable, because
+> ISSUE-1, TEST_STATUS and BRUCELINK all present this as unmitigated and none of
+> them record the 21 minutes. The tasks below are kept unrun for the record.
+
+## Task 4 (WITHDRAWN — see the notice above): Revert the unsound in-library semaphore calls
 
 **Files:**
 - Modify: `lib/TFT_eSPI/TFT_eSPI.cpp`, `lib/TFT_eSPI/Extensions/Touch.cpp`
@@ -649,7 +693,7 @@ sites that actually collide in the next commits."
 
 ---
 
-## Task 5: The `tft_lock` module
+## Task 5 (WITHDRAWN — see the notice above): The `tft_lock` module
 
 **Files:**
 - Create: `src/core/tft_lock.h`, `src/core/tft_lock.cpp`
@@ -771,7 +815,7 @@ tells the two apart."
 
 ---
 
-## Task 6: Bracket both dispatch paths
+## Task 6 (WITHDRAWN — see the notice above): Bracket both dispatch paths
 
 **Files:**
 - Modify: `src/core/serialcmds.cpp:67`, `src/core/serialcmds.cpp:87`
@@ -860,7 +904,7 @@ the BLE path is the one both recorded backtraces came in over."
 
 ---
 
-## Task 7: Bracket the main-loop repaint and surface the counter
+## Task 7 (WITHDRAWN — see the notice above): Bracket the main-loop repaint and surface the counter
 
 **Files:**
 - Modify: `src/core/display.cpp:592-595`, `src/core/serial_commands/util_commands.cpp:105-130`
@@ -943,7 +987,7 @@ behaviour, not a fault; a climbing tftdrop with no verb running is the wedge."
 
 ---
 
-## Task 8: RC1-A hardware verification
+## Task 8 (WITHDRAWN — see the notice above): RC1-A hardware verification
 
 **Files:** `docs/TEST_STATUS.md`, `docs/KNOWN_ISSUES.md`
 
