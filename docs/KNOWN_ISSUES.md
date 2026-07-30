@@ -2742,6 +2742,41 @@ incomplete: on a dimmed screen it takes two.**
 
 ---
 
+### ISSUE-42 — the `options` verb's reply went to `Serial` and never reached the app
+
+**Status:** **RESOLVED 2026-07-30 in `util_commands.cpp`** · **Severity:** low (`optionsJSON`
+already covered the read path) · **Verified** over BLE, ELF `3dd17e72827f4325`
+
+`optionsList()` wrote every line with `Serial.println` (`util_commands.cpp:238-247`) in a
+file that uses `serialDevice->` **97 times**. This is the bug class BRUCELINK.md already
+flags for `settings_commands.cpp:19` — output on `Serial` reaches nothing on this board
+(ISSUE-22). Caught while driving the menu remotely for ISSUE-41: `options` returned
+**3 bytes** (the bare prompt) against a 14-entry menu, while `optionsJSON` returned 442.
+
+**The fix is a parameter, not a substitution, and that distinction matters.**
+`optionsList()` has two callers with different needs, and `navCallback` carries an
+explicit comment — *"Here send press response only to USB serial to avoid problems with
+BLE app"* (`:265`). Switching the function wholesale would have dumped the entire menu onto
+the BLE characteristic **after every `nav` pulse**, and ISSUE-19 establishes that `nav` is
+pulsed repeatedly until the device answers. So the target is passed in: `optionsCallback`
+passes `serialDevice`, `navCallback` passes `&USBserial`, and the documented intent
+survives.
+
+| check | before | after |
+|---|---|---|
+| `options` over BLE | **3 bytes** | **222 bytes**, full menu with the `>` hover marker |
+| `nav next` / `nav prev` over BLE | 3 bytes | **3 bytes** — dump correctly stays off BLE |
+| `options <n>` | selection only | selection **+ list** reaches the app |
+
+**A second defect was fixed in the same function.** `optionsCallback` reported the choice
+by reading back `options[forceMenuOption]` *after* assigning it — but `forceMenuOption` is
+`volatile int` and the main loop clears it to `-1` the moment it consumes the selection
+(`display.cpp:742-744`), so an unlucky interleave indexes `options[-1]`. It now reports
+from the local `opt`. Never observed firing; found by reading the path. Same family as
+ISSUE-41 — a global mutated by another task, read back after a hand-off.
+
+---
+
 ## Not tested, and why
 
 Recorded so the gap is visible rather than implied. Session of 2026-07-29, unattended.

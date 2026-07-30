@@ -235,13 +235,18 @@ uint32_t helpCallback(cmd *c) {
     return true;
 }
 
-void optionsList() {
+// The target is a parameter rather than serialDevice because the two callers want
+// different ones: `options` is a query and must reach the app, while navCallback
+// deliberately keeps its feedback on USB only, and ISSUE-19 says nav gets pulsed
+// repeatedly — routing this dump onto the BLE characteristic would repeat the whole
+// menu after every pulse.
+void optionsList(SerialDevice *out) {
     int i = 0;
-    Serial.println("\nActual Menu: " + menuOptionLabel);
-    Serial.println("Options available: ");
+    out->println("\nActual Menu: " + menuOptionLabel);
+    out->println("Options available: ");
     for (auto opt : options) {
         String txt = (opt.hovered ? ">" : " ") + String(i) + " - " + opt.label;
-        Serial.println(txt);
+        out->println(txt);
         i++;
     }
 }
@@ -307,7 +312,7 @@ uint32_t navCallback(cmd *c) {
     }
     tmp = millis() - tmp;
     Serial.printf("and Released after %lums", tmp);
-    optionsList();
+    optionsList(&USBserial);
 
     return true;
 }
@@ -320,14 +325,15 @@ uint32_t optionsCallback(cmd *c) {
 
     if (opt >= 0 && opt < options.size()) {
         // wakeUpScreen(); // Do not wakeup screen if it is dimmed and using Remote control
+        // Reported from `opt`, not from forceMenuOption: the main loop clears that back
+        // to -1 the moment it consumes the selection (display.cpp), so reading it here
+        // could index options[-1] on an unlucky interleave.
+        serialDevice->printf("Selected option %d: %s\n", opt, options[opt].label.c_str());
         forceMenuOption = opt;
-        serialDevice->printf(
-            "Selected option %d: %s\n", forceMenuOption, options[forceMenuOption].label.c_str()
-        );
         vTaskDelay(30 / portTICK_PERIOD_MS);
-        optionsList();
+        optionsList(serialDevice);
     } else if (options.size() > 0) {
-        optionsList();
+        optionsList(serialDevice);
     } else serialDevice->println("No options Available");
     return true;
 }
