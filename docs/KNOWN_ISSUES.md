@@ -1085,8 +1085,23 @@ in a one-line curl result and mean opposite things:
 
 ### ISSUE-18 — `POST /login` writes the whole config to flash, and can abort the device
 
-**Status:** OPEN · **Severity:** critical (it is the first request any client makes) ·
+**Status:** **RESOLVED in `22ab5974`** — sessions are RAM-only and are no longer
+serialised at all · **Severity:** was critical (it is the first request any client makes) ·
 **Verified** 2026-07-29 · **Crash 1/1 with an ELF-matched backtrace; HTTP failure 2/2**
+
+> **Bookkeeping correction, 2026-07-30.** This entry sat marked OPEN for two sessions
+> *after* the fix had already shipped. `22ab5974` removed `saveFile()` from all three
+> session functions and its commit body records the hardware result: **8 consecutive
+> logins caused no abort where ~4 used to, and latency fell from 350 ms–2.35 s to
+> 67–237 ms.** Confirmed against the current tree — `addWebUISession`
+> (`config.cpp:870-874`), `removeWebUISession` (`:876-883`) and `isValidWebUISession`
+> (`:885-909`) contain no `saveFile()`, and the last carries an explicit comment saying
+> why. **Nothing was re-run today; this is a records fix, not a new verification.**
+>
+> The fix was broader than this entry's title: the write came from **three** call sites,
+> and `isValidWebUISession()` runs on *every* authenticated request whose token is not
+> already the most recent — so the flash write was reachable from **any** authenticated
+> route, not just `POST /login`.
 
 Each successful login appends a session token and immediately persists the **entire**
 config file to LittleFS. Under the memory pressure the WebUI itself creates, that
@@ -2527,8 +2542,23 @@ rather than being its own defect.
 
 ### ISSUE-39 — `reverseshell` leaves its AP on air after a clean exit
 
-**Status:** OPEN · **Severity:** medium (an attack AP keeps broadcasting after the
-operator ended the attack, and holds ~63 KB) · **Verified** on hardware 2026-07-30
+**Status:** **FIX SHIPPED, AWAITING OPERATOR VERIFICATION** (ELF `46d975be7d38f128`) ·
+**Severity:** medium (an attack AP keeps broadcasting after the operator ended the attack,
+and holds ~63 KB) · **Verified** on hardware 2026-07-30
+
+> **Fix, 2026-07-30:** `wifiDisconnect()` on **all four** exits of `ReverseShell()`, not
+> just the clean one — `WiFi.mode(WIFI_AP)` is set at `reverseShell.cpp:82` *before* the
+> `softAPConfig` and `softAP` failure returns, so those two also returned with the radio
+> armed. `wifiDisconnect()` (`wifi_common.cpp:152-164`) does `softAPdisconnect(true)` +
+> `disconnect(true, true)` + `WIFI_OFF`, which is the outcome this entry asked for.
+>
+> ⚠️ **NOT yet verified on hardware, and it cannot be verified remotely.** The verb blocks
+> the serial task *and* binds port 80, so neither BLE nor `/cm nav esc` can reach it; the
+> only exit is the on-device **LEFT+RIGHT** chord. Verification needs an operator at the
+> board: dispatch `reverseshell`, confirm `BruceShell` on air, press the chord, then check
+> the AP is gone from an independent `nmcli` scan **and** that `free` returns to its ~81 K
+> boot plateau rather than the ~18 K this entry recorded. Until that is done this is a
+> **code-verified fix only**.
 
 Exposed the moment ISSUE-38 stopped crashing: nothing had ever survived the exit long
 enough to see what it left behind.
@@ -2565,9 +2595,10 @@ of that batch's scope, and it wants its own verified flash cycle.
 
 ### ISSUE-40 — `restartWiFi()` duplicates the portal's whole route table on every rename
 
-**Status:** OPEN · **Severity:** low-medium (unbounded handler growth on a device that
-already runs out of heap after one page load) · **Verified** by code 2026-07-30 ·
-**Not observed at runtime**
+**Status:** **RESOLVED 2026-07-30** — `webServer.reset()` added after `end()` in
+`restartWiFi()`; measured on ELF `46d975be7d38f128` · **Severity:** was low-medium
+(unbounded handler growth on a device with ~16 KB free) · **Verified** by code
+2026-07-30, then **confirmed by a before/after measurement**
 
 `EvilPortal::restartWiFi()` calls `webServer.end()` and then `setupRoutes()` again. But
 **`end()` does not clear the handler list** — only `reset()` does
@@ -2591,6 +2622,40 @@ already-large flash cycle would have made any regression un-attributable.
 
 **Not yet quantified.** No run has counted handlers or measured the per-rename heap delta;
 the claim is from the library source, not a measurement. Worth confirming before fixing.
+
+**Measured and fixed 2026-07-30.** The fix is `webServer.reset()` immediately after
+`webServer.end()` in `restartWiFi()` (`evil_portal.cpp:282`). It is safe because
+`setupRoutes()` re-registers `onNotFound` (`:262`), which `reset()` nulls along with the
+handler list.
+
+| rename #1 | free before | free after | delta |
+|---|---|---|---|
+| ELF `e81b0c28f80e70dd`, run A | 16,499 | 13,735 | **−2,764** |
+| ELF `e81b0c28f80e70dd`, run B | 16,231 | 13,375 | **−2,856** |
+| ELF `46d975be7d38f128` (fixed) | 16,735 | 16,511 | **−224** |
+
+Two independent before-measurements agree to within 92 bytes, and the fix removes ~2.6 KB
+of it. That matches the predicted cost of duplicating ~17 `AsyncCallbackWebHandler`s at
+roughly 160 bytes each, which is what makes this a confirmation rather than a coincidence.
+
+⚠️ **Only ONE rename per run was ever measured, and the per-rename figure above is
+gross, not a pure handler cost.** Two attempts to measure *repeated* renames both failed,
+and the failure is worth recording because it will defeat the next attempt too:
+
+- **Attempt 1** renamed to a fresh SSID each time. `evilportal -status` showed `ssid:Ren1`
+  at the end, so **1 of 4 renames landed** — re-association failed once the AP changed
+  name. Its "~468 B per rename" was an artifact and is discarded.
+- **Attempt 2** renamed to the *same* SSID (the handler never compares, so this still
+  forces a full restart) to keep the profile valid. The console showed only **one**
+  `STA disconnect failed` line during the run — `restartWiFi()`'s signature — plus one at
+  portal stop, so again **only rename #1 executed**. `nmcli` reported the profile still
+  "active", which is why the harness's own liveness check did not catch it.
+
+**The rename destroys the association needed to issue the next rename, and `/ssid` is the
+only trigger** (`_pendingWifiRestart` is set nowhere else — `evil_portal.cpp:254`, consumed
+at `:316-318` and `:409-411`). So "unbounded growth" remains **inferred from the library
+source, not observed**; what is now measured is that one rename costs ~2.8 KB before the
+fix and ~0.2 KB after.
 
 ---
 

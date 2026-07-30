@@ -2,6 +2,7 @@
 // Include our own header so the declaration and the definition cannot drift apart.
 #include "reverseShell.h"
 #include "core/display.h"
+#include "core/wifi/wifi_common.h"
 #include <DNSServer.h>
 #include <WiFi.h>
 #include <WiFiClient.h>
@@ -82,6 +83,10 @@ bool ReverseShell() {
     if (!WiFi.softAPConfig(apGateway, apGateway, IPAddress(255, 255, 255, 0))) {
         tft.println("Failed to configure AP");
         log_e("reverseshell: softAPConfig failed");
+        // Every exit below tears the radio down, including the failures: WIFI_AP is
+        // already set by this point, so returning without it left the mode armed
+        // (ISSUE-39).
+        wifiDisconnect();
         return false;
     }
 
@@ -93,6 +98,7 @@ bool ReverseShell() {
     if (!WiFi.softAP("BruceShell", REVERSE_SHELL_AP_PASSWORD)) {
         tft.println("Failed to start AP");
         log_e("reverseshell: softAP failed");
+        wifiDisconnect();
         return false;
     }
 
@@ -114,6 +120,7 @@ bool ReverseShell() {
         tft.println("Out of memory for WebSocket");
         log_e("reverseshell: AsyncWebSocket allocation failed");
         tcpServer.stop();
+        wifiDisconnect();
         return false;
     }
     ws->onEvent(onWsEvent);
@@ -216,6 +223,10 @@ bool ReverseShell() {
             ws->closeAll();
             webServer.end();
             dnsServer.stop();
+            // The exit stopped every server but never brought the radio down, so
+            // BruceShell kept broadcasting WPA2 after the operator ended the attack and
+            // ~63 KB stayed held — the device looked idle and was not (ISSUE-39).
+            wifiDisconnect();
             break;
         }
         delay(10);

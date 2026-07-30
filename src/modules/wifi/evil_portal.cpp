@@ -280,6 +280,12 @@ void EvilPortal::setupRoutes() {
 
 void EvilPortal::restartWiFi(bool reset) {
     webServer.end();
+    // end() stops the listener but leaves _handlers populated — only reset() clears it
+    // (WebServer.cpp:199-206). setupRoutes() below then appends a second copy of all ~17
+    // routes, and _attachHandler takes the first match, so the stale copies shadow the
+    // live ones forever. One rename measured ~2.8 KB against a portal that has ~16 KB
+    // (ISSUE-40). Safe because setupRoutes() re-registers onNotFound, which reset() nulls.
+    webServer.reset();
     dnsServer->stop();
     vTaskDelay(100 / portTICK_PERIOD_MS);
 
