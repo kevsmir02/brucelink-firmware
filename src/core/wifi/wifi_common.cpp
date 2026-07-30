@@ -3,6 +3,7 @@
 #include "core/mykeyboard.h"
 #include "core/powerSave.h"
 #include "core/radio_mem.h"
+#include "core/serialcmds.h"
 #include "core/ram_profile.h"
 #include "core/settings.h"
 #include "core/utils.h"
@@ -15,6 +16,14 @@
 
 static TaskHandle_t timezoneTaskHandle = NULL;
 static bool wifiTransitioning = false;
+
+// A red banner may wait for an acknowledgement only when a human is at the device.
+// displayError's waitKeyPress spins on check(AnyKeyPress) (display.cpp:322); reached
+// from the serial task that holds the CLI with no BLE dismissal AND no HTTP rescue,
+// because the WebUI `/cm nav esc` needs is the very thing these gates refuse to start.
+// taskInputHandler clearing button globals every 75ms (main.cpp:84-111) can erase the
+// press that would release it, and a dimmed screen swallows the first one anyway.
+static bool errorMayWaitForKey() { return xTaskGetCurrentTaskHandle() != serialcmdsTaskHandle; }
 
 esp_err_t wifiRawTx(wifi_interface_t ifx, const void *frame, int len, uint8_t retries) {
     esp_err_t err = esp_wifi_80211_tx(ifx, frame, len, false);
@@ -142,7 +151,13 @@ bool _connectToWifiNetwork(const String &ssid, const String &pwd) {
 bool _setupAP() {
     IPAddress AP_GATEWAY(172, 0, 0, 1);
     WiFi.softAPConfig(AP_GATEWAY, AP_GATEWAY, IPAddress(255, 255, 255, 0));
-    WiFi.softAP(bruceConfig.wifiAp.ssid, bruceConfig.wifiAp.pwd, 6, 0, 4, false);
+    // softAP()'s return was discarded here and wifiConnected set regardless, so a
+    // failed AP left the whole firmware believing one existed — ISSUE-28's shape,
+    // one module along, on the path `webui` actually takes.
+    if (!WiFi.softAP(bruceConfig.wifiAp.ssid, bruceConfig.wifiAp.pwd, 6, 0, 4, false)) {
+        log_e("_setupAP: softAP failed for SSID '%s'", bruceConfig.wifiAp.ssid.c_str());
+        return false;
+    }
     wifiIP = WiFi.softAPIP().toString(); // update global var
     Serial.println("IP: " + wifiIP);
     wifiConnected = true;
@@ -180,6 +195,18 @@ bool wifiConnectMenu(wifi_mode_t mode) {
 
     switch (mode) {
         case WIFI_AP: // access point
+            // The STA case below has refused on a low contiguous DMA block since the
+            // guard was added; the AP case never did — and `webui` defaults to AP, so
+            // the mode the verb actually uses was ungated at every level.
+            if (!radioHasMemForWifi()) {
+                log_e(
+                    "wifiConnectMenu: AP refused, largest DMA block %u < %u required",
+                    (unsigned)radioLargestDmaBlock(),
+                    (unsigned)RADIO_WIFI_MIN_DMA_BLOCK
+                );
+                displayError("Low RAM: free BLE/SD first", errorMayWaitForKey());
+                return false;
+            }
             WiFi.mode(WIFI_AP);
             return _setupAP();
             break;
@@ -187,7 +214,7 @@ bool wifiConnectMenu(wifi_mode_t mode) {
         case WIFI_STA: { // station mode
             int nets;
             if (!radioHasMemForWifi()) {
-                displayError("Low RAM: free BLE/SD first", true);
+                displayError("Low RAM: free BLE/SD first", errorMayWaitForKey());
                 return false;
             }
             WiFi.mode(WIFI_MODE_STA);
