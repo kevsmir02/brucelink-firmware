@@ -275,6 +275,41 @@ with `-DRF_DEBUG=1` if you want them.
 
   Check the panic's `ELF file SHA256` against the local ELF before trusting a decode.
 
+- **The build is bit-for-bit reproducible, so an old dump is still decodable.** Measured
+  2026-07-30: nine commits were rebuilt and every one reproduced the ELF hash recorded for
+  it at the time. `esp_app_desc`'s embedded timestamp is the **framework's** build date
+  (`Jul 15 2026`), not the local compile time, so nothing drifts between builds of the same
+  source. Consequence: `git checkout <commit> && pio run -e smoochiee-board` regenerates the
+  exact ELF a stored core dump needs, which is what makes `crashlog` useful days after the
+  fact rather than only for the running build.
+
+  **`sha256sum .pio/build/smoochiee-board/firmware.elf | cut -c1-9` is the panic handler's
+  `ELF file SHA256` and `crashlog`'s `elf=`/`running_elf=`** — one digest, three places.
+  Verified: all three read `79fc138cd` for `2b39286a`.
+
+  | Commit | ELF sha256 (first 16) |
+  |---|---|
+  | `2d9422ea` | `5186685c0fdf19c2` |
+  | `881ade6f` | `b919402708ab4de0` |
+  | `4c4378a1` | `76d42c72f2b4a8a4` |
+  | `22ab5974` | `411d7e151dbc2356` |
+  | `cedad77f`, `038c00fd` | `f5244eb35dd10795` (identical — the later commit is docs-only) |
+  | `6fd2b5fc` | `e81b0c28f80e70dd` |
+  | `f54bbc6c` | `46d975be7d38f128` |
+  | `afa17b57` | `2efaeec784a5768a` |
+  | `3629afd7` | `3dd17e72827f4325` |
+
+  ⚠️ **`TEST_STATUS.md` credits `76d42c72f2b4a8a4` to firmware "`fbfe6226`". That is wrong** —
+  the commit that produces it is **`4c4378a1`**, confirmed by rebuild. Treat any
+  commit-to-ELF attribution not in the table above as unverified.
+
+  ⚠️ **Reproducible per *source*, not per *behaviour*: even a comment-only edit changes the
+  ELF hash.** `log_e` bakes `__LINE__` into the binary — the console prints
+  `[E][crash_commands.cpp:93]` — so inserting a comment above it shifts the hash without
+  changing what the firmware does. Measured: adding one comment block took `2b39286a`'s
+  `79fc138cd` to `fabcc0003`. So a `match=NO` from `crashlog` means "not this exact source",
+  which is stricter than "not this code" — and it is the behaviour you want from a guard.
+
 ## Known gotchas
 
 - **`[CLI] Result: TRUE` does not mean success.** Every attack callback ends in a bare

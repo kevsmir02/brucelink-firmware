@@ -13,8 +13,14 @@ measurement (device + date) or a code fact (`file:line`). Nothing here is inferr
 **Hardware under test:** bare ESP32‑S3‑N16R8 devkit, 1.47" 172×320 IPS LCD on SPI,
 five buttons, USB powered. No PMU, SD, CC1101, NRF24, PN532, IR or GPS. Env
 `smoochiee-board`. Firmware `2d9422ea`, ELF `5186685c0fdf19c2`; the headless-portal
-rows are from firmware `fbfe6226`, ELF `76d42c72f2b4a8a4`; the 2026-07-30 fix rows
-(ISSUE-5, 7, 15, 18, 23, 28, 29, 30, 31) are from ELF **`411d7e151dbc2356`**.
+rows are from ELF `76d42c72f2b4a8a4`, **which is commit `4c4378a1`, not `fbfe6226` as
+this line said until 2026-07-30** — confirmed by rebuilding it; the 2026-07-30 fix rows
+(ISSUE-5, 7, 15, 18, 23, 28, 29, 30, 31) are from ELF **`411d7e151dbc2356`** = `22ab5974`.
+
+**The build is bit-for-bit reproducible** — nine commits rebuilt to their recorded ELF
+hashes exactly (table in `BRUCELINK.md` §Testing), because `esp_app_desc`'s timestamp is
+the framework's, not the local compile time. So a stored core dump stays decodable: check
+out its commit, rebuild, and `addr2line` against that ELF.
 
 ---
 

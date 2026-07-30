@@ -74,9 +74,13 @@ static uint32_t crashlogCallback(cmd *c) {
 
     // The decode is only valid if the stored dump came from the firmware now
     // running, and the repo's rule is to check that before trusting any addr2line
-    // output. Both values come from the same app-descriptor field the panic handler
-    // prints, so comparing them here settles it on-device -- a host-side
-    // `sha256sum firmware.elf` is a different digest and would not match.
+    // output. Comparing on-device settles it without needing the ELF to hand, which
+    // is the case that matters when a dump turns up days later.
+    //
+    // It agrees with the host: measured 2026-07-30, `sha256sum firmware.elf |
+    // cut -c1-9` and the panic handler's "ELF file SHA256" both read 79fc138cd for
+    // this build. An earlier comment here claimed the host digest was different and
+    // could never match; that was wrong.
     const char *running = esp_app_get_elf_sha256_str();
     serialDevice->printf(
         "crash: running_elf=%s match=%s\r\n",

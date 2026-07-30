@@ -555,11 +555,24 @@ capture of the event** · **Not reproduced in 2 subsequent attempts**
 > task, while this is **`loopTask` — the main loop**. Whether it is *this* entry's reboot is
 > **unknown**; it is simply the most recent panic the partition held.
 >
-> ⚠️ **Undecoded, and deliberately not guessed at.** `app_elf_sha256` is `a4bc5d735` and the
-> build that produced it is gone from `.pio`, so decoding against any current ELF would be
-> fiction by this repo's own rule. Recoverable only by rebuilding the commit whose app sha
-> is `a4bc5d735` and confirming the match first. The raw record is kept above so that
-> remains possible.
+> ⚠️ **Undecoded, and deliberately not guessed at.** `app_elf_sha256` is `a4bc5d735`, and
+> decoding against any other ELF would be fiction by this repo's own rule.
+>
+> **Searched for that build on 2026-07-30 and did not find it.** Nine commits were rebuilt
+> — `2d9422ea`, `881ade6f`, `4c4378a1`, `22ab5974`, `cedad77f`, `038c00fd`, `6fd2b5fc`,
+> `f54bbc6c`, `afa17b57`, `3629afd7` — and **every one reproduced the ELF hash already
+> recorded for it**, so the build is bit-for-bit reproducible and the search method is
+> sound. None is `a4bc5d735`. Every ELF ever recorded in these docs is now accounted for
+> and none matches either.
+>
+> The sweep was stopped with ~49 of 62 compiled-path commits untried, because it blocked
+> all other work on the tree for an estimated 2.5 h at a falling probability. **The most
+> likely explanation is a build from a dirty working tree during a debug session, which no
+> commit can reproduce.**
+>
+> **If you want to resume:** `git checkout <commit> && pio run -e smoochiee-board`, then
+> `sha256sum .pio/build/smoochiee-board/firmware.elf | cut -c1-9` and compare to
+> `a4bc5d735`. The raw frames are preserved above precisely so this stays possible.
 
 During the first post-fix verification sweep the device rebooted once. It was detected
 after the fact, not observed: `uptime` read `00:01:00` with `free` reporting
