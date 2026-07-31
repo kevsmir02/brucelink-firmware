@@ -333,14 +333,18 @@ Field notes — these bit us, read them:
   populated Smoochiee V2; the flags describe that profile, not your board. Keep an
   app-side truth table instead.
 - **`battery_pct` and `charging` are only meaningful if a PMU is fitted.**
-  `getBattery()` and `isCharging()` call `PPM.*` unconditionally and ignore the
-  `pmu_ret` result of `PPM.init()` (`boards/smoochiee-board/interface.cpp:38-75`).
-  With no BQ25896 on the bus the reads fail, voltage comes back 0, the percentage
-  computes negative and `if (percent < 0) return 1` clamps it. Measured on the
-  reference unit 2026-07-29: **`battery_pct` is permanently `1` and `charging`
-  permanently `true`**, and the failing polls emit a continuous
-  `i2cWrite(): ... ESP_ERR_INVALID_STATE` stream on the console (~10 per 22 s).
-  The example above is from a board that has the PMU.
+  `getBattery()` and `isCharging()` used to call `PPM.*` unconditionally, ignoring the
+  `pmu_ret` result of `PPM.init()`; with no BQ25896 on the bus the reads failed,
+  voltage came back 0, the percentage computed negative and `if (percent < 0) return 1`
+  clamped it. **Corrected 2026-07-31 (`b1c825c8`, KNOWN_ISSUES §ISSUE-3 partial):** both
+  now early-return on a stored `pmu_present` flag
+  (`boards/smoochiee-board/interface.cpp:62-74`), so **`isCharging()` reports `false`**
+  and the ~10/22 s `i2cWrite(): … ESP_ERR_INVALID_STATE` console storm is gone (0 bytes
+  in 55 s). What is **still** wrong on the reference unit: **`battery_pct` is
+  permanently `1`** — a sentinel was rejected (`getBattery()` is assigned to a `uint8_t`
+  at `display.cpp` / `BatteryService.cpp`, so `-1` renders as 255%), and an honest "no
+  battery" needs a cross-board `batteryPresent()`. The example above is from a board that
+  has the PMU.
 
 ---
 

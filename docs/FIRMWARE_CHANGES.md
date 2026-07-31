@@ -277,12 +277,17 @@ Not built, and not planned unless the app actually needs them:
   only an LCD and buttons, `/systeminfo` claims CC1101, NRF24, GPS, IR, buzzer,
   RGB LED and mic while `i2c` on the same device returns `No I2C devices found`
   (measured 2026-07-29). Runtime probing is not implemented.
-- **`battery_pct` and `charging` are wrong with no PMU fitted.** `getBattery()`
-  and `isCharging()` call `PPM.*` regardless of whether `PPM.init()` succeeded
-  (`boards/smoochiee-board/interface.cpp:38-75`). On a board with no BQ25896 they
-  report a permanent `battery_pct: 1` / `charging: true` and the failing polls
-  emit a continuous `ESP_ERR_INVALID_STATE` stream on the console — roughly 10
-  per 22 s, measured 2026-07-29.
+- **`battery_pct` is still wrong with no PMU fitted; `charging` and the I²C storm
+  are fixed.** `getBattery()` and `isCharging()` used to call `PPM.*` regardless of
+  whether `PPM.init()` succeeded, reporting a permanent `battery_pct: 1` /
+  `charging: true` and emitting a continuous `ESP_ERR_INVALID_STATE` stream on the
+  console — roughly 10 per 22 s, measured 2026-07-29. **Fixed in `b1c825c8`
+  (KNOWN_ISSUES §ISSUE-3, partial):** both now early-return on a stored `pmu_present`
+  flag (`boards/smoochiee-board/interface.cpp:62-74`), so `isCharging()` reports
+  `false` and the console storm is gone (0 bytes in 55 s). `battery_pct` still
+  reports `1` — a sentinel was rejected because `getBattery()` is assigned to a
+  `uint8_t` (at `display.cpp` / `BatteryService.cpp`), so `-1` would render as 255%;
+  an honest "no battery" needs a cross-board `batteryPresent()` and is not done.
 - **iOS visibility unconfirmed.** `Bruc` is visible in BLE scans from a PC; an
   iPhone 8 did not see it, likely iOS BLE privacy filtering. Untested on other
   iOS devices.

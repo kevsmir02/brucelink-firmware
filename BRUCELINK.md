@@ -13,7 +13,8 @@ capabilities over a command bus reachable via BLE GATT and WiFi HTTP.
 
 - **Fork point:** upstream `59e83bfb`. Fork work starts at `373fb5d8`.
 - **Target board:** `smoochiee-board` env — ESP32‑S3‑N16R8, 16 MB flash, 8 MB OPI PSRAM.
-- **Companion app:** `/home/kevsmir07/Projects/maritest` (React Native/Expo). It
+- **Companion app:** `/home/kevsmir07/Projects/brucelink` (React Native/Expo;
+  renamed from `maritest`). It
   vendors a copy of the API contract in `vendor/`; if you change the interface,
   that copy goes stale.
 
@@ -121,7 +122,10 @@ normally, `&serial_service` (the BLE GATT service) while the BLE API is armed
 (`ble_api.cpp:63`). This is the single most common source of confusion:
 
 - Output written to `Serial` instead of `*serialDevice` **never reaches the app**.
-  That is a real bug in `settings_commands.cpp:19` (see `docs/KNOWN_ISSUES.md`).
+  `settings` used to do this — `settings_commands.cpp` serialised to `Serial` and the
+  app saw an empty reply; **fixed in `b1c825c8` (ISSUE-2 resolved)**, it now goes to
+  `*serialDevice`. The lesson stands: anything the app must read goes through
+  `*serialDevice`, never bare `Serial`.
 - While BLE is armed, the USB CDC port accepts **no** CLI input. It still carries
   `ESP_LOG`/panic output, which is why the USB console is the only place a crash
   backtrace appears.
@@ -231,10 +235,12 @@ else. Therefore:
   probes.** They report `has_cc1101`, `has_nrf24`, `has_gps`, `has_ir`, `has_buzz`,
   `has_rgb_led`, `has_mic` all `true` on a board with none of them, while `i2c`
   returns `No I2C devices found`. **Never gate behaviour on them.**
-- **`battery_pct` is permanently `1` and `charging` permanently `true`** — no PMU
-  fitted, and `getBattery()` calls `PPM.*` regardless of whether `PPM.init()`
-  succeeded. Expect a continuous `ESP_ERR_INVALID_STATE` I2C error stream on the
-  console; it is this, and it is not a new fault.
+- **`battery_pct` is permanently `1`; `charging` is `false`; the I²C storm is gone.**
+  No PMU fitted. `getBattery()`/`isCharging()` now early-return on a stored `pmu_present`
+  flag (`interface.cpp:62-74`, fixed in `b1c825c8`, ISSUE-3 partial), so `isCharging()`
+  reports `false` and the old `ESP_ERR_INVALID_STATE` console stream is gone. `battery_pct`
+  is still `1` — a sentinel was rejected because the value is assigned to a `uint8_t`, so
+  `-1` would render as 255%; an honest "no battery" needs a cross-board `batteryPresent()`.
 - No SD card: `SD` totals read `0 B`. Files live on LittleFS (~11.4 MB).
 
 Ground truth comes from `i2c` (bus scan) and the `free` verb — not from
@@ -325,10 +331,15 @@ with `-DRF_DEBUG=1` if you want them.
 
 ## Known gotchas
 
-- **`[CLI] Result: TRUE` does not mean success.** Every attack callback ends in a bare
-  `return true` and discards the outcome (`attack_commands.cpp:147-175`). Observed:
-  `reverseshell` reported `TRUE` 30 ms after its AP creation failed outright. It is a
-  *completion* signal only.
+- **`[CLI] Result: TRUE` does not mean success.** **Narrowed 2026-07-31:** the *five
+  interactive* verbs (`karma`, `deauth`, `blesniffer`, `ap_info`, `pwngrid`) still end
+  in a bare `return true` (`runInteractiveAttack`, `attack_commands.cpp:212`) because
+  the upstream entry points they call are `void`, so there is no outcome to propagate.
+  Two verbs now report real failure: `deauth` returns `false` on an unsupported target
+  (`:230`) and `reverseshell` returns `false` when its AP does not come up (`:249`).
+  For any outcome decision prefer the `attack_result` frame (`pushAttackResult`,
+  `:197-204`); `[CLI] Result:` is a *completion* signal only. Observed early on:
+  `reverseshell` reported `TRUE` 30 ms after its AP creation had failed outright.
 - **`deauth` and `evilportal`-under-load crashed the device, and are now mitigated —
   but ISSUE-1 is still open, on purpose.** Menu-dispatcher verbs draw to the TFT from the
   serial task while the main loop draws the same display over the same SPI bus; the bus
