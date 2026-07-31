@@ -101,7 +101,7 @@ Verified end-to-end on hardware, safe to expose as a one-tap action.
 | `nav` rescue needs repeated pulses | One pulse fails. Pulse until the device answers. Minimum not bisected. |
 | WebUI margin is ~18 KB | Starts from a clean boot; fails silently if anything consumed heap first (ISSUE-12). A JS run within the last ~2 s is enough to break it (ISSUE-17). |
 | Discover by service UUID, never by name | `4371ec0b-3d43-49f9-b731-7c72a4a7bb91`. |
-| Transports alternate, never coexist | Start the WebUI **before** dropping BLE, or the device is stranded (ISSUE-22). |
+| Never drop BLE without a WebUI already up | ⚠️ **Corrected 2026-07-31:** this row previously read "Transports alternate, never coexist" — **wrong**, and contradicted by the "HTTP bodies with BLE armed" row above, which already records that claim as corrected. BLE + AP + WebUI ran together repeatedly on 2026-07-31 and served `POST /login` and `POST /cm` fine. The real constraint is the **recovery surface**, not coexistence: BLE is the only remote command interface on this board (ISSUE-22), so dropping it with no WebUI listening strands the device. Start the WebUI **before** dropping BLE. Coexistence works, but on almost no margin — see ISSUE-12 and the ~18 KB row above. |
 | `POST /login` is form-encoded | Fields are `username`/`password`, **not** JSON `{user,pwd}`. Wrong form fails silently with a 200 and no cookie. |
 | Never store real WiFi credentials | **Still plaintext in `bruce.conf`**, link still unauthenticated. The `settings` dump is now redacted (ISSUE-23), which closes casual disclosure but not file reads. |
 | BLE replies can truncate silently | No `[TRUNCATED]` marker. Treat a missing EOT as "retry" (ISSUE-16). Hash files, don't eyeball listings. |
