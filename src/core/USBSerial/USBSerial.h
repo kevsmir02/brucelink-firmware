@@ -19,6 +19,12 @@ public:
     int available() override { return out->available(); }
     size_t write(uint8_t *str, size_t size) override { return out->write(str, size); }
     int read() override { return out->read(); }
+    // The base SerialDevice::endOfResponse() is a no-op because a human-facing
+    // console already ends a reply with the "# " prompt the caller prints. A
+    // programmatic client over USB (tools/serial/cli.py) needs an unambiguous
+    // machine boundary, just like BLE — so emit the same 0x04 EOT byte that
+    // BLESerialService::endOfResponse() does.
+    void endOfResponse() override { out->write('\x04'); }
     void setSerialOutput(Stream *in) { out = in; }
     Stream *getSerialOutput() { return out; }
     USBSerial(Stream *in = &Serial) { out = in; }
