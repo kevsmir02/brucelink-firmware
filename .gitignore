@@ -29,3 +29,6 @@ lib/mquickjs_headers/mqjs_stdlib_generator.exe
 # Python bytecode from tools/ble_spike bench scripts
 __pycache__/
 *.pyc
+
+# SDD plans and design specs — local working notes, not published
+docs/superpowers/

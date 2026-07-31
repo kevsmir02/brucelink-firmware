@@ -407,7 +407,8 @@ with `-DRF_DEBUG=1` if you want them.
 
 ## Further reading
 
-Docs under `docs/`, in the order worth reading them:
+Docs under `docs/`, indexed by **`docs/README.md`**. This file is the condensed
+version of all of them; where it disagrees, the more recently verified one wins.
 
 - **`docs/TEST_STATUS.md`** — coverage map: what has actually been run on hardware,
   what is shippable, what is broken, and what is still untested with the reason.
@@ -420,5 +421,15 @@ Docs under `docs/`, in the order worth reading them:
 - **`docs/FIRMWARE_CHANGES.md`** — rationale. Why the fork exists, what changed by
   area with commit refs, and the dead ends (documented because the code still carries
   guards that only make sense if you know them).
+- **`docs/ARCHITECTURE.md`** — the command bus, both transports, dispatch, the event
+  stream, and what is a new file versus a modified upstream one.
+- **`docs/HARDWARE.md`** — what the reference unit physically is, where the board
+  profile lies about it, and the two-USB-port asymmetry that once looked like a brick.
+- **`docs/BUILDING.md`** — toolchain pins, build/flash, partition layout, reproducible
+  builds and the ELF-hash table, decoding a crash.
+- **`docs/TESTING.md`** — how to run each test level, and the traps in each.
+- **`docs/ROADMAP.md`** — the three things left: fit the missing modules, close the
+  open stability issues, track upstream.
 
 `LAYOUT.md` and `2.0_road_path.md` are upstream files, not fork documentation.
+`docs/superpowers/` is local working notes — untracked as of 2026-08-01.
