@@ -4,7 +4,7 @@
 #include "rf_utils.h"
 #include <ELECHOUSE_CC1101_SRC_DRV.h>
 static bool
-record_rmt_rx_done_callback(rmt_channel_t *[[maybe_unused]] channel, const rmt_rx_done_event_data_t *edata, void *user_data) {
+record_rmt_rx_done_callback([[maybe_unused]] rmt_channel_t *channel, const rmt_rx_done_event_data_t *edata, void *user_data) {
     BaseType_t high_task_wakeup = pdFALSE;
     QueueHandle_t receive_queue = (QueueHandle_t)user_data;
     // send the received RMT symbols to the parser task
