@@ -14,7 +14,7 @@ public:
     void on_disconnect();
 
 private:
-    NimBLEServer *pServer;
+    NimBLEServer *pServer = nullptr;
     BatteryService battery_service;
     BLESerialService serial_service;
 };

@@ -4,7 +4,7 @@
 #include "rf_utils.h"
 #include <ELECHOUSE_CC1101_SRC_DRV.h>
 static bool
-record_rmt_rx_done_callback(rmt_channel_t *channel, const rmt_rx_done_event_data_t *edata, void *user_data) {
+record_rmt_rx_done_callback(rmt_channel_t *[[maybe_unused]] channel, const rmt_rx_done_event_data_t *edata, void *user_data) {
     BaseType_t high_task_wakeup = pdFALSE;
     QueueHandle_t receive_queue = (QueueHandle_t)user_data;
     // send the received RMT symbols to the parser task
@@ -329,15 +329,25 @@ void rf_raw_record_create(RawRecording &recorded, bool &returnToMenu) {
             bool valid_signal = false;
             if (rx_size >= 5) valid_signal = true;
             if (valid_signal) {         // ignore codes shorter than 5 items
+                // rx_size is radio-derived and unbounded by anything here, so an
+                // OOM malloc is a real possibility -- with no MMU it is a null
+                // deref and a crash, not a recoverable fault. Skip the capture
+                // rather than corrupting recorded.codes with a null pointer the
+                // cleanup pass (recorded.codes free() at end) would dereference.
+                // Mirrors rf_durations_to_rmt_symbols()'s null check at :90.
                 rmt_symbol_word_t *code = (rmt_symbol_word_t *)malloc(rx_size * sizeof(rmt_symbol_word_t));
-
-                // Gap calculation
-                unsigned long long signalDuration = 0;
-                for (size_t i = 0; i < rx_size; i++) {
-                    code[i] = rx_items[i];
-                    signalDuration += rx_items[i].duration0 + rx_items[i].duration1;
+                if (code == nullptr) {
+                    ESP_LOGE("RF_RAW", "malloc(%u symbols) failed; skipping capture",
+                             (unsigned)rx_size);
+                } else {
+                    // Gap calculation
+                    unsigned long long signalDuration = 0;
+                    for (size_t i = 0; i < rx_size; i++) {
+                        code[i] = rx_items[i];
+                        signalDuration += rx_items[i].duration0 + rx_items[i].duration1;
+                    }
+                    rf_raw_record_accept_capture(recorded, status, fakeRssiPresent, code, rx_size, signalDuration);
                 }
-                rf_raw_record_accept_capture(recorded, status, fakeRssiPresent, code, rx_size, signalDuration);
             }
             ESP_ERROR_CHECK(rmt_receive(rx_ch, item, sizeof(item), &receive_config));
             rx_size = 0;

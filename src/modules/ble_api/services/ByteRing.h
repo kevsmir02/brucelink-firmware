@@ -9,7 +9,10 @@
 // write rather than overwriting unread bytes: a truncated command fails to parse
 // loudly, whereas overwriting would silently corrupt an in-flight one.
 template <size_t N> class ByteRing {
-    uint8_t buf[N];
+    uint8_t buf[N]{};  // zero-init so no uninit bytes before the first write
+                       //  (cppcheck uninitMemberVarNoCtor; head/tail/count are
+                       //  the validity tracker, but on a no-MMU ESP32-S3 an
+                       //  uninit read is UB, not a noisy warning)
     size_t head = 0;  // next read index
     size_t tail = 0;  // next write index
     size_t count = 0;
